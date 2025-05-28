@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv( )  # Carrega variáveis do arquivo .env
+
 from flask import Flask, request, jsonify
 import os
 import requests
