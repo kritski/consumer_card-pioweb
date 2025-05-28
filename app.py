@@ -11,6 +11,7 @@ import datetime
 from datetime import datetime, timezone, timedelta
 import logging
 from logging.handlers import RotatingFileHandler
+import traceback
 
 # Configurar logging
 logging.basicConfig(
@@ -71,10 +72,28 @@ def validate_order_data(data):
     """
     Valida os dados do pedido recebidos
     """
+    # Verificar se data é um dicionário
+    if not isinstance(data, dict):
+        return False, f"Dados inválidos: esperado um dicionário, recebido {type(data)}"
+    
+    # Verificar campos obrigatórios com tratamento de erro
     required_fields = ['id', 'created_at', 'order_type']
+    missing_fields = []
+    
     for field in required_fields:
         if field not in data:
-            return False, f"Campo obrigatório ausente: {field}"
+            # Verificar se o campo existe com notação de ponto
+            found = False
+            for key in data.keys():
+                if key == field or key.startswith(field + '.') or key == field.replace('_', '.'):
+                    found = True
+                    break
+            
+            if not found:
+                missing_fields.append(field)
+    
+    if missing_fields:
+        return False, f"Campos obrigatórios ausentes: {', '.join(missing_fields)}"
     
     return True, "Dados válidos"
 
@@ -139,12 +158,46 @@ def transform_to_consumer_format(cardapio_order):
     """
     Transforma o formato do CardápioWeb para o formato do Consumer
     """
+    # Log dos dados recebidos para depuração
+    logger.info(f"Dados recebidos para transformação: {json.dumps(cardapio_order, default=str)}")
+    
+    # Se os dados vierem em um array, pegar o primeiro item
+    if isinstance(cardapio_order, list) and len(cardapio_order) > 0:
+        cardapio_order = cardapio_order[0]
+    
+    # Se os dados vierem como string JSON, converter para dicionário
+    if isinstance(cardapio_order, str):
+        try:
+            cardapio_order = json.loads(cardapio_order)
+        except json.JSONDecodeError:
+            logger.error("Erro ao decodificar string JSON")
+            return None
+    
     # Se os dados vierem com notação de ponto, transformar para objetos aninhados
     if isinstance(cardapio_order, dict) and any('.' in key for key in cardapio_order.keys()):
         cardapio_order = transform_dotted_to_nested(cardapio_order)
     
+    # Garantir que temos os campos mínimos necessários
+    required_fields = ['id', 'created_at', 'order_type']
+    for field in required_fields:
+        if field not in cardapio_order and not any(key.startswith(field + '.') for key in cardapio_order.keys()):
+            # Tentar encontrar campos equivalentes
+            if field == 'created_at' and 'createdAt' in cardapio_order:
+                cardapio_order['created_at'] = cardapio_order['createdAt']
+            elif field == 'order_type' and 'orderType' in cardapio_order:
+                cardapio_order['order_type'] = cardapio_order['orderType']
+            else:
+                logger.error(f"Campo obrigatório ausente: {field}")
+                return None
+    
     # Extrair dados do cliente
     customer = cardapio_order.get('customer', {})
+    if isinstance(customer, str):
+        try:
+            customer = json.loads(customer)
+        except:
+            customer = {}
+    
     customer_phone = customer.get('phone', {})
     if isinstance(customer_phone, str):
         phone_number = customer_phone
@@ -152,12 +205,32 @@ def transform_to_consumer_format(cardapio_order):
         phone_number = customer_phone.get('number', '')
     
     # Extrair dados de pagamento
-    payment_info = cardapio_order.get('payments', {}).get('methods', [{}])[0]
+    payments = cardapio_order.get('payments', {})
+    if isinstance(payments, str):
+        try:
+            payments = json.loads(payments)
+        except:
+            payments = {}
+    
+    payment_methods = payments.get('methods', [{}])
+    if isinstance(payment_methods, str):
+        try:
+            payment_methods = json.loads(payment_methods)
+        except:
+            payment_methods = [{}]
+    
+    payment_info = payment_methods[0] if payment_methods else {}
     payment_method = payment_info.get('method', 'ONLINE')
     payment_type = payment_info.get('type', 'CREDIT')
     
     # Calcular valores
     total_info = cardapio_order.get('total', {})
+    if isinstance(total_info, str):
+        try:
+            total_info = json.loads(total_info)
+        except:
+            total_info = {}
+    
     subtotal = float(total_info.get('subTotal', 0))
     delivery_fee = float(total_info.get('deliveryFee', 0))
     total = float(total_info.get('orderAmount', 0))
@@ -168,23 +241,44 @@ def transform_to_consumer_format(cardapio_order):
     
     # Extrair dados de entrega
     delivery_info = cardapio_order.get('delivery', {})
+    if isinstance(delivery_info, str):
+        try:
+            delivery_info = json.loads(delivery_info)
+        except:
+            delivery_info = {}
+    
     delivery_address = delivery_info.get('deliveryAddress', {})
+    if isinstance(delivery_address, str):
+        try:
+            delivery_address = json.loads(delivery_address)
+        except:
+            delivery_address = {}
     
     # Extrair dados do estabelecimento
     merchant = cardapio_order.get('merchant', {})
+    if isinstance(merchant, str):
+        try:
+            merchant = json.loads(merchant)
+        except:
+            merchant = {}
     
     # Extrair itens
     items = cardapio_order.get('items', [])
+    if isinstance(items, str):
+        try:
+            items = json.loads(items)
+        except:
+            items = []
     
     # Construir o objeto de resposta no formato do Consumer
     consumer_format = {
-        "id": cardapio_order.get('id'),
-        "displayId": cardapio_order.get('displayId'),
-        "orderType": cardapio_order.get('orderType', 'DELIVERY').upper(),
-        "salesChannel": cardapio_order.get('salesChannel', 'MARKETPLACE').upper(),
-        "orderTiming": cardapio_order.get('orderTiming', 'ASAP').upper(),
-        "createdAt": cardapio_order.get('createdAt'),
-        "preparationStartDateTime": cardapio_order.get('preparationStartDateTime'),
+        "id": str(cardapio_order.get('id', '')),
+        "displayId": cardapio_order.get('displayId', ''),
+        "orderType": str(cardapio_order.get('orderType', cardapio_order.get('order_type', 'DELIVERY'))).upper(),
+        "salesChannel": str(cardapio_order.get('salesChannel', 'MARKETPLACE')).upper(),
+        "orderTiming": str(cardapio_order.get('orderTiming', 'ASAP')).upper(),
+        "createdAt": cardapio_order.get('createdAt', cardapio_order.get('created_at', now.isoformat())),
+        "preparationStartDateTime": cardapio_order.get('preparationStartDateTime', now.isoformat()),
         "merchant": {
             "id": str(merchant.get('id', '')),
             "name": merchant.get('name', 'Seu Restaurante')
@@ -205,7 +299,7 @@ def transform_to_consumer_format(cardapio_order):
                     "value": float(payment_info.get('value', total))
                 }
             ],
-            "pending": float(cardapio_order.get('payments', {}).get('pending', 0)),
+            "pending": float(payments.get('pending', 0)),
             "prepaid": total
         },
         "customer": {
@@ -221,7 +315,8 @@ def transform_to_consumer_format(cardapio_order):
     }
     
     # Adicionar dados de entrega se for um pedido de delivery
-    if cardapio_order.get('orderType', '').lower() == 'delivery':
+    order_type = str(cardapio_order.get('orderType', cardapio_order.get('order_type', ''))).lower()
+    if order_type == 'delivery':
         consumer_format["delivery"] = {
             "mode": delivery_info.get('mode', 'EXPRESS'),
             "deliveredBy": delivery_info.get('deliveredBy', 'MERCHANT'),
@@ -243,6 +338,12 @@ def transform_to_consumer_format(cardapio_order):
     # Adicionar itens
     formatted_items = []
     for item in items:
+        if isinstance(item, str):
+            try:
+                item = json.loads(item)
+            except:
+                continue
+        
         formatted_items.append({
             "id": str(item.get('id', '')),
             "externalCode": item.get('externalCode', ''),
@@ -255,6 +356,9 @@ def transform_to_consumer_format(cardapio_order):
         })
     
     consumer_format["items"] = formatted_items
+    
+    # Log do objeto transformado para depuração
+    logger.info(f"Objeto transformado: {json.dumps(consumer_format, default=str)}")
     
     return consumer_format
 
@@ -269,22 +373,48 @@ def health_check():
 def receive_orders_from_make():
     logger.info("Recebendo dados do Make.com")
     try:
-        # Obter os dados da requisição
-        data = request.json
-        logger.info(f"Dados recebidos: {data}")
+        # Log do corpo da requisição para depuração
+        request_data = request.get_data(as_text=True)
+        logger.info(f"Dados brutos recebidos: {request_data}")
+        
+        # Tentar obter os dados como JSON
+        try:
+            data = request.json
+            logger.info(f"Dados JSON parseados: {data}")
+        except Exception as e:
+            logger.error(f"Erro ao parsear JSON: {str(e)}")
+            # Tentar parsear manualmente
+            try:
+                data = json.loads(request_data)
+                logger.info(f"Dados JSON parseados manualmente: {data}")
+            except:
+                logger.error("Falha ao parsear JSON manualmente")
+                return jsonify({'status': 'error', 'message': 'Formato JSON inválido'}), 400
         
         # Se os dados vierem em um array, pegar o primeiro item
         if isinstance(data, list) and len(data) > 0:
             data = data[0]
         
-        # Validar os dados recebidos
-        is_valid, message = validate_order_data(data)
-        if not is_valid:
-            logger.error(f"Dados inválidos: {message}")
-            return jsonify({'status': 'error', 'message': message}), 400
+        # Validar os dados recebidos com tratamento de erro mais robusto
+        try:
+            is_valid, message = validate_order_data(data)
+            if not is_valid:
+                logger.error(f"Dados inválidos: {message}")
+                return jsonify({'status': 'error', 'message': message}), 400
+        except Exception as e:
+            logger.error(f"Erro na validação de dados: {str(e)}")
+            return jsonify({'status': 'error', 'message': f"Erro na validação: {str(e)}"}), 400
         
-        # Transformar os dados para o formato do Consumer
-        consumer_data = transform_to_consumer_format(data)
+        # Transformar os dados para o formato do Consumer com tratamento de erro
+        try:
+            consumer_data = transform_to_consumer_format(data)
+            if not consumer_data:
+                logger.error("Falha na transformação de dados")
+                return jsonify({'status': 'error', 'message': 'Falha na transformação de dados'}), 400
+        except Exception as e:
+            logger.error(f"Erro na transformação de dados: {str(e)}")
+            logger.error(traceback.format_exc())
+            return jsonify({'status': 'error', 'message': f"Erro na transformação: {str(e)}"}), 400
         
         # Armazenar no cache para uso posterior
         order_id = str(consumer_data.get('id'))
@@ -299,6 +429,7 @@ def receive_orders_from_make():
     
     except Exception as e:
         logger.error(f"Erro ao processar pedido: {str(e)}")
+        logger.error(traceback.format_exc())
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # Endpoint de polling - Consumer consulta novos pedidos
