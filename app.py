@@ -201,6 +201,7 @@ def transform_to_consumer_format(cardapio_order):
     customer_phone = customer.get('phone', {})
     if isinstance(customer_phone, str):
         phone_number = customer_phone
+        customer_phone = {'number': phone_number}
     else:
         phone_number = customer_phone.get('number', '')
     
@@ -218,6 +219,8 @@ def transform_to_consumer_format(cardapio_order):
             payment_methods = json.loads(payment_methods)
         except:
             payment_methods = [{}]
+    elif not isinstance(payment_methods, list):
+        payment_methods = [payment_methods]
     
     payment_info = payment_methods[0] if payment_methods else {}
     payment_method = payment_info.get('method', 'ONLINE')
@@ -234,6 +237,10 @@ def transform_to_consumer_format(cardapio_order):
     subtotal = float(total_info.get('subTotal', 0))
     delivery_fee = float(total_info.get('deliveryFee', 0))
     total = float(total_info.get('orderAmount', 0))
+    
+    # Se o total for zero, tentar calcular a partir de outros campos
+    if total == 0:
+        total = subtotal + delivery_fee
     
     # Criar objeto no formato do Consumer
     now = datetime.now(timezone.utc)
@@ -269,14 +276,17 @@ def transform_to_consumer_format(cardapio_order):
             items = json.loads(items)
         except:
             items = []
+    elif not isinstance(items, list):
+        # Se items não for uma lista, tentar converter
+        items = [items]
     
     # Construir o objeto de resposta no formato do Consumer
     consumer_format = {
         "id": str(cardapio_order.get('id', '')),
-        "displayId": cardapio_order.get('displayId', ''),
+        "displayId": str(cardapio_order.get('displayId', cardapio_order.get('display_id', ''))),
         "orderType": str(cardapio_order.get('orderType', cardapio_order.get('order_type', 'DELIVERY'))).upper(),
-        "salesChannel": str(cardapio_order.get('salesChannel', 'MARKETPLACE')).upper(),
-        "orderTiming": str(cardapio_order.get('orderTiming', 'ASAP')).upper(),
+        "salesChannel": str(cardapio_order.get('salesChannel', cardapio_order.get('sales_channel', 'MARKETPLACE'))).upper(),
+        "orderTiming": str(cardapio_order.get('orderTiming', cardapio_order.get('order_timing', 'ASAP'))).upper(),
         "createdAt": cardapio_order.get('createdAt', cardapio_order.get('created_at', now.isoformat())),
         "preparationStartDateTime": cardapio_order.get('preparationStartDateTime', now.isoformat()),
         "merchant": {
@@ -287,8 +297,8 @@ def transform_to_consumer_format(cardapio_order):
             "subTotal": subtotal,
             "deliveryFee": delivery_fee,
             "orderAmount": total,
-            "benefits": 0,
-            "additionalFees": 0
+            "benefits": float(total_info.get('benefits', 0)),
+            "additionalFees": float(total_info.get('additionalFees', 0))
         },
         "payments": {
             "methods": [
@@ -326,9 +336,9 @@ def transform_to_consumer_format(cardapio_order):
                 "country": delivery_address.get('country', 'Brasil'),
                 "state": delivery_address.get('state', ''),
                 "city": delivery_address.get('city', ''),
-                "postalCode": delivery_address.get('postalCode', ''),
-                "streetName": delivery_address.get('streetName', ''),
-                "streetNumber": delivery_address.get('streetNumber', ''),
+                "postalCode": delivery_address.get('postalCode', delivery_address.get('postal_code', '')),
+                "streetName": delivery_address.get('streetName', delivery_address.get('street_name', '')),
+                "streetNumber": delivery_address.get('streetNumber', delivery_address.get('street_number', '')),
                 "neighborhood": delivery_address.get('neighborhood', ''),
                 "complement": delivery_address.get('complement'),
                 "reference": delivery_address.get('reference')
@@ -344,14 +354,21 @@ def transform_to_consumer_format(cardapio_order):
             except:
                 continue
         
+        # Garantir que temos os campos mínimos necessários para o item
+        item_id = str(item.get('id', ''))
+        item_name = item.get('name', '')
+        item_quantity = int(item.get('quantity', 1))
+        item_unit_price = float(item.get('unitPrice', item.get('unit_price', 0)))
+        item_total_price = float(item.get('totalPrice', item.get('total_price', item_unit_price * item_quantity)))
+        
         formatted_items.append({
-            "id": str(item.get('id', '')),
-            "externalCode": item.get('externalCode', ''),
-            "name": item.get('name', ''),
-            "quantity": int(item.get('quantity', 1)),
-            "unitPrice": float(item.get('unitPrice', 0)),
-            "totalPrice": float(item.get('totalPrice', 0)),
-            "observations": item.get('observations'),
+            "id": item_id,
+            "externalCode": item.get('externalCode', item.get('external_code', item_id)),
+            "name": item_name,
+            "quantity": item_quantity,
+            "unitPrice": item_unit_price,
+            "totalPrice": item_total_price,
+            "observations": item.get('observations', None),
             "options": item.get('options', [])
         })
     
@@ -416,15 +433,16 @@ def receive_orders_from_make():
             logger.error(traceback.format_exc())
             return jsonify({'status': 'error', 'message': f"Erro na transformação: {str(e)}"}), 400
         
-        # Armazenar no cache para uso posterior
-        order_id = str(consumer_data.get('id'))
+        # Armazenar o pedido em cache para consultas futuras
+        order_id = consumer_data['id']
         orders_cache[order_id] = consumer_data
         
+        # Retornar os dados transformados
         logger.info(f"Pedido {order_id} processado com sucesso")
         return jsonify({
             'status': 'success',
-            'message': 'Pedido recebido com sucesso',
-            'order_id': order_id
+            'message': 'Pedido processado com sucesso',
+            'data': consumer_data
         })
     
     except Exception as e:
@@ -432,73 +450,89 @@ def receive_orders_from_make():
         logger.error(traceback.format_exc())
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# Endpoint de polling - Consumer consulta novos pedidos
+# Endpoint de polling - Consumer busca pedidos novos
 @app.route('/api/parceiro/polling', methods=['GET'])
 def polling():
     logger.info("Polling solicitado pelo Consumer")
     try:
-        # Formatar a resposta no padrão esperado pelo Consumer
-        items = []
-        for order_id, order in orders_cache.items():
-            items.append({
-                'id': str(uuid.uuid4()),  # ID único do evento
-                'orderId': order_id,
-                'createdAt': order.get('createdAt'),
-                'fullCode': 'PLACED',
-                'code': 'PLC'
-            })
+        # Chamar o webhook do Make.com para buscar pedidos novos
+        response = requests.post(
+            MAKE_WEBHOOK_URL,
+            json={
+                'action': 'polling',
+                'timestamp': datetime.now().isoformat()
+            },
+            headers={'Content-Type': 'application/json'}
+        )
         
-        consumer_response = {
-            'items': items,
-            'statusCode': 0,
-            'reasonPhrase': None
-        }
+        if response.status_code != 200:
+            logger.error(f"Erro ao buscar pedidos no Make.com: {response.status_code}")
+            return jsonify({'error': 'Erro ao buscar pedidos no Make.com'}), 500
         
-        logger.info(f"Retornando {len(items)} pedidos para o Consumer")
-        return jsonify(consumer_response)
+        # Processar a resposta do Make.com
+        make_data = response.json()
+        
+        # Transformar os dados para o formato do Consumer
+        orders = []
+        for order in make_data.get('orders', []):
+            consumer_order = transform_to_consumer_format(order)
+            if consumer_order:
+                orders.append({
+                    'id': consumer_order['id'],
+                    'reference': consumer_order.get('displayId', ''),
+                    'status': 'PENDING'
+                })
+                # Armazenar o pedido em cache para consultas futuras
+                orders_cache[consumer_order['id']] = consumer_order
+        
+        # Retornar os pedidos no formato esperado pelo Consumer
+        logger.info(f"Polling retornou {len(orders)} pedidos")
+        return jsonify(orders)
     
     except Exception as e:
         logger.error(f"Erro no polling: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-# Endpoint de detalhes do pedido - Consumer consulta detalhes de um pedido específico
+# Endpoint de detalhes do pedido - Consumer busca detalhes de um pedido específico
 @app.route('/api/parceiro/order/<order_id>', methods=['GET'])
-def order_details(order_id):
-    logger.info(f"Detalhes do pedido solicitados para: {order_id}")
+def get_order_details(order_id):
+    logger.info(f"Detalhes solicitados para pedido: {order_id}")
     try:
-        # Verificar se o pedido está no cache
+        # Verificar se o pedido está em cache
         if order_id in orders_cache:
-            # Retornar os detalhes do pedido no formato esperado pelo Consumer
-            logger.info(f"Retornando detalhes do pedido: {order_id}")
+            logger.info(f"Pedido {order_id} encontrado em cache")
             return jsonify(orders_cache[order_id])
-        else:
-            # Se não estiver no cache, tentar buscar do Make.com
-            response = requests.post(
-                MAKE_WEBHOOK_URL,
-                json={
-                    'action': 'order_details',
-                    'order_id': order_id,
-                    'timestamp': datetime.now().isoformat()
-                },
-                headers={'Content-Type': 'application/json'}
-            )
-            
-            if response.status_code != 200:
-                logger.error(f"Erro ao buscar detalhes do pedido no Make.com: {response.status_code}")
-                return jsonify({'error': 'Pedido não encontrado'}), 404
-            
-            # Processar a resposta do Make.com
-            make_data = response.json()
-            
-            # Transformar para o formato do Consumer
-            consumer_data = transform_to_consumer_format(make_data)
-            
-            # Armazenar no cache para uso posterior
-            orders_cache[order_id] = consumer_data
-            
-            # Retornar os detalhes do pedido
-            logger.info(f"Retornando detalhes do pedido: {order_id}")
-            return jsonify(consumer_data)
+        
+        # Se não estiver em cache, buscar no Make.com
+        response = requests.post(
+            MAKE_WEBHOOK_URL,
+            json={
+                'action': 'get_order_details',
+                'order_id': order_id,
+                'timestamp': datetime.now().isoformat()
+            },
+            headers={'Content-Type': 'application/json'}
+        )
+        
+        if response.status_code != 200:
+            logger.error(f"Erro ao buscar detalhes do pedido no Make.com: {response.status_code}")
+            return jsonify({'error': 'Erro ao buscar detalhes do pedido no Make.com'}), 500
+        
+        # Processar a resposta do Make.com
+        make_data = response.json()
+        
+        # Transformar os dados para o formato do Consumer
+        consumer_data = transform_to_consumer_format(make_data)
+        if not consumer_data:
+            logger.error(f"Falha na transformação de dados para o pedido {order_id}")
+            return jsonify({'error': 'Falha na transformação de dados'}), 500
+        
+        # Armazenar o pedido em cache para consultas futuras
+        orders_cache[order_id] = consumer_data
+        
+        # Retornar os dados transformados
+        logger.info(f"Detalhes do pedido {order_id} retornados com sucesso")
+        return jsonify(consumer_data)
     
     except Exception as e:
         logger.error(f"Erro ao obter detalhes do pedido: {str(e)}")
