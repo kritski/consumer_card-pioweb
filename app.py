@@ -117,6 +117,16 @@ def extract_data_from_bundle(bundle_data):
             data = bundle_data[0].get('data')
             logger.info(f"Dados extraídos do campo 'data': {type(data)}")
             return data
+        elif isinstance(bundle_data[0], dict) and 'text' in bundle_data[0]:
+            # Formato do Text Aggregator: [{text: "json string"}]
+            text = bundle_data[0].get('text')
+            try:
+                data = json.loads(text)
+                logger.info(f"Dados extraídos do campo 'text' (Text Aggregator): {type(data)}")
+                return data
+            except:
+                logger.error("Erro ao parsear JSON do campo 'text'")
+                return bundle_data[0]
         else:
             # Retornar o primeiro item do array
             logger.info(f"Dados extraídos do primeiro item do array: {type(bundle_data[0])}")
@@ -127,6 +137,16 @@ def extract_data_from_bundle(bundle_data):
         if 'data' in bundle_data:
             logger.info(f"Dados extraídos do campo 'data' do objeto: {type(bundle_data['data'])}")
             return bundle_data['data']
+        elif 'text' in bundle_data:
+            # Formato do Text Aggregator: {text: "json string"}
+            text = bundle_data.get('text')
+            try:
+                data = json.loads(text)
+                logger.info(f"Dados extraídos do campo 'text' (Text Aggregator): {type(data)}")
+                return data
+            except:
+                logger.error("Erro ao parsear JSON do campo 'text'")
+                return bundle_data
         else:
             # Retornar o próprio dicionário
             logger.info("Usando o próprio dicionário como dados")
@@ -252,15 +272,42 @@ def transform_to_consumer_format(cardapio_order):
         except:
             payments = {}
     
-    payment_methods = payments.get('methods', [{}])
-    if isinstance(payment_methods, str):
-        try:
-            payment_methods = json.loads(payment_methods)
-        except:
-            payment_methods = [{}]
-    elif not isinstance(payment_methods, list):
-        payment_methods = [payment_methods]
+    # CORREÇÃO: Tratar payments como lista ou dicionário
+    payment_methods = []
+    payment_pending = 0
     
+    # Se payments for uma lista, extrair o primeiro item
+    if isinstance(payments, list):
+        logger.info("Campo 'payments' recebido como lista")
+        if payments:
+            first_payment = payments[0]
+            # Extrair método de pagamento do primeiro item da lista
+            payment_method = first_payment.get('payment_method', first_payment.get('method', 'ONLINE'))
+            payment_type = first_payment.get('payment_type', first_payment.get('type', 'CREDIT'))
+            payment_value = float(first_payment.get('total', first_payment.get('value', 0)))
+            payment_currency = first_payment.get('currency', 'BRL')
+            
+            payment_methods = [{
+                'method': payment_method,
+                'type': payment_type,
+                'currency': payment_currency,
+                'value': payment_value
+            }]
+    else:
+        # Tratar como dicionário
+        logger.info("Campo 'payments' recebido como dicionário")
+        payment_methods = payments.get('methods', [{}])
+        payment_pending = float(payments.get('pending', 0))
+        
+        if isinstance(payment_methods, str):
+            try:
+                payment_methods = json.loads(payment_methods)
+            except:
+                payment_methods = [{}]
+        elif not isinstance(payment_methods, list):
+            payment_methods = [payment_methods]
+    
+    # Extrair informações do primeiro método de pagamento
     payment_info = payment_methods[0] if payment_methods else {}
     payment_method = payment_info.get('method', 'ONLINE')
     payment_type = payment_info.get('type', 'CREDIT')
@@ -272,10 +319,29 @@ def transform_to_consumer_format(cardapio_order):
             total_info = json.loads(total_info)
         except:
             total_info = {}
+    elif isinstance(total_info, (int, float)):
+        # Se total for um número, criar um dicionário com esse valor
+        total_value = float(total_info)
+        total_info = {'orderAmount': total_value}
     
-    subtotal = float(total_info.get('subTotal', 0))
-    delivery_fee = float(total_info.get('deliveryFee', 0))
-    total = float(total_info.get('orderAmount', 0))
+    # Extrair valores de subtotal, delivery_fee e total
+    subtotal = 0
+    delivery_fee = 0
+    total = 0
+    
+    # Tentar extrair subtotal
+    if isinstance(total_info, dict):
+        subtotal = float(total_info.get('subTotal', total_info.get('subtotal', 0)))
+    
+    # Tentar extrair delivery_fee
+    delivery_fee = float(cardapio_order.get('delivery_fee', 0))
+    
+    # Tentar extrair total
+    if isinstance(total_info, dict):
+        total = float(total_info.get('orderAmount', total_info.get('order_amount', 0)))
+    else:
+        # Tentar obter total diretamente do pedido
+        total = float(cardapio_order.get('total', 0))
     
     # Se o total for zero, tentar calcular a partir de outros campos
     if total == 0:
@@ -293,7 +359,16 @@ def transform_to_consumer_format(cardapio_order):
         except:
             delivery_info = {}
     
-    delivery_address = delivery_info.get('deliveryAddress', {})
+    # Extrair endereço de entrega
+    delivery_address = {}
+    
+    # Verificar se temos delivery_address no objeto delivery
+    if isinstance(delivery_info, dict) and 'deliveryAddress' in delivery_info:
+        delivery_address = delivery_info.get('deliveryAddress', {})
+    # Verificar se temos delivery_address diretamente no pedido
+    elif 'delivery_address' in cardapio_order:
+        delivery_address = cardapio_order.get('delivery_address', {})
+    
     if isinstance(delivery_address, str):
         try:
             delivery_address = json.loads(delivery_address)
@@ -307,6 +382,12 @@ def transform_to_consumer_format(cardapio_order):
             merchant = json.loads(merchant)
         except:
             merchant = {}
+    
+    # Se merchant for vazio, tentar extrair merchant_id e merchant_name
+    if not merchant:
+        merchant_id = cardapio_order.get('merchant_id', '')
+        merchant_name = cardapio_order.get('merchant_name', 'Seu Restaurante')
+        merchant = {'id': merchant_id, 'name': merchant_name}
     
     # Extrair itens
     items = cardapio_order.get('items', [])
@@ -336,8 +417,8 @@ def transform_to_consumer_format(cardapio_order):
             "subTotal": subtotal,
             "deliveryFee": delivery_fee,
             "orderAmount": total,
-            "benefits": float(total_info.get('benefits', 0)),
-            "additionalFees": float(total_info.get('additionalFees', 0))
+            "benefits": float(total_info.get('benefits', 0)) if isinstance(total_info, dict) else 0,
+            "additionalFees": float(total_info.get('additionalFees', 0)) if isinstance(total_info, dict) else 0
         },
         "payments": {
             "methods": [
@@ -348,7 +429,7 @@ def transform_to_consumer_format(cardapio_order):
                     "value": float(payment_info.get('value', total))
                 }
             ],
-            "pending": float(payments.get('pending', 0)),
+            "pending": payment_pending,
             "prepaid": total
         },
         "customer": {
@@ -366,18 +447,23 @@ def transform_to_consumer_format(cardapio_order):
     # Adicionar dados de entrega se for um pedido de delivery
     order_type = str(cardapio_order.get('orderType', cardapio_order.get('order_type', ''))).lower()
     if order_type == 'delivery':
+        # Mapear campos do endereço de entrega
+        street_name = delivery_address.get('streetName', delivery_address.get('street_name', delivery_address.get('street', '')))
+        street_number = delivery_address.get('streetNumber', delivery_address.get('street_number', delivery_address.get('number', '')))
+        postal_code = delivery_address.get('postalCode', delivery_address.get('postal_code', delivery_address.get('zip_code', '')))
+        
         consumer_format["delivery"] = {
             "mode": delivery_info.get('mode', 'EXPRESS'),
-            "deliveredBy": delivery_info.get('deliveredBy', 'MERCHANT'),
+            "deliveredBy": delivery_info.get('deliveredBy', cardapio_order.get('delivered_by', 'MERCHANT')),
             "pickupCode": delivery_info.get('pickupCode'),
             "deliveryDateTime": delivery_info.get('deliveryDateTime', now.isoformat()),
             "deliveryAddress": {
                 "country": delivery_address.get('country', 'Brasil'),
                 "state": delivery_address.get('state', ''),
                 "city": delivery_address.get('city', ''),
-                "postalCode": delivery_address.get('postalCode', delivery_address.get('postal_code', '')),
-                "streetName": delivery_address.get('streetName', delivery_address.get('street_name', '')),
-                "streetNumber": delivery_address.get('streetNumber', delivery_address.get('street_number', '')),
+                "postalCode": postal_code,
+                "streetName": street_name,
+                "streetNumber": street_number,
                 "neighborhood": delivery_address.get('neighborhood', ''),
                 "complement": delivery_address.get('complement'),
                 "reference": delivery_address.get('reference')
@@ -394,7 +480,7 @@ def transform_to_consumer_format(cardapio_order):
                 continue
         
         # Garantir que temos os campos mínimos necessários para o item
-        item_id = str(item.get('id', ''))
+        item_id = str(item.get('id', item.get('item_id', '')))
         item_name = item.get('name', '')
         item_quantity = int(item.get('quantity', 1))
         item_unit_price = float(item.get('unitPrice', item.get('unit_price', 0)))
@@ -407,7 +493,7 @@ def transform_to_consumer_format(cardapio_order):
             "quantity": item_quantity,
             "unitPrice": item_unit_price,
             "totalPrice": item_total_price,
-            "observations": item.get('observations', None),
+            "observations": item.get('observations', item.get('observation', None)),
             "options": item.get('options', [])
         })
     
