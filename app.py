@@ -97,6 +97,45 @@ def validate_order_data(data):
     
     return True, "Dados válidos"
 
+# Função para extrair dados do bundle do Make.com
+def extract_data_from_bundle(bundle_data):
+    """
+    Extrai dados do bundle do Make.com, que pode ser um array ou objeto
+    """
+    logger.info(f"Extraindo dados do bundle: {type(bundle_data)}")
+    
+    # Se for um array, processar cada item
+    if isinstance(bundle_data, list):
+        # Verificar se o array contém dados
+        if not bundle_data:
+            logger.warning("Bundle vazio recebido")
+            return None
+        
+        # Verificar se o primeiro item é um dicionário com campo 'data'
+        if isinstance(bundle_data[0], dict) and 'data' in bundle_data[0]:
+            # Formato comum do Make.com: [{data: {...}}]
+            data = bundle_data[0].get('data')
+            logger.info(f"Dados extraídos do campo 'data': {type(data)}")
+            return data
+        else:
+            # Retornar o primeiro item do array
+            logger.info(f"Dados extraídos do primeiro item do array: {type(bundle_data[0])}")
+            return bundle_data[0]
+    
+    # Se for um dicionário, verificar se tem campo 'data'
+    elif isinstance(bundle_data, dict):
+        if 'data' in bundle_data:
+            logger.info(f"Dados extraídos do campo 'data' do objeto: {type(bundle_data['data'])}")
+            return bundle_data['data']
+        else:
+            # Retornar o próprio dicionário
+            logger.info("Usando o próprio dicionário como dados")
+            return bundle_data
+    
+    # Se não for nem array nem dicionário, retornar como está
+    logger.warning(f"Formato de dados não reconhecido: {type(bundle_data)}")
+    return bundle_data
+
 # Função para transformar dados com notação de ponto para objetos aninhados
 def transform_dotted_to_nested(data):
     """
@@ -394,56 +433,80 @@ def receive_orders_from_make():
         request_data = request.get_data(as_text=True)
         logger.info(f"Dados brutos recebidos: {request_data}")
         
+        # Verificar se o corpo da requisição está vazio
+        if not request_data or request_data.isspace():
+            logger.error("Corpo da requisição vazio")
+            return jsonify({'status': 'error', 'message': 'Corpo da requisição vazio'}), 400
+        
         # Tentar obter os dados como JSON
         try:
+            # Tentar obter os dados diretamente do request
             data = request.json
-            logger.info(f"Dados JSON parseados: {data}")
+            logger.info(f"Dados JSON parseados do request: {type(data)}")
         except Exception as e:
-            logger.error(f"Erro ao parsear JSON: {str(e)}")
+            logger.error(f"Erro ao parsear JSON do request: {str(e)}")
             # Tentar parsear manualmente
             try:
                 data = json.loads(request_data)
-                logger.info(f"Dados JSON parseados manualmente: {data}")
-            except:
-                logger.error("Falha ao parsear JSON manualmente")
+                logger.info(f"Dados JSON parseados manualmente: {type(data)}")
+            except Exception as json_e:
+                logger.error(f"Falha ao parsear JSON manualmente: {str(json_e)}")
                 return jsonify({'status': 'error', 'message': 'Formato JSON inválido'}), 400
         
-        # Se os dados vierem em um array, pegar o primeiro item
-        if isinstance(data, list) and len(data) > 0:
-            data = data[0]
+        # Extrair dados do bundle do Make.com
+        extracted_data = extract_data_from_bundle(data)
+        if extracted_data is None:
+            logger.error("Não foi possível extrair dados do bundle")
+            return jsonify({'status': 'error', 'message': 'Não foi possível extrair dados do bundle'}), 400
         
-        # Validar os dados recebidos com tratamento de erro mais robusto
-        try:
-            is_valid, message = validate_order_data(data)
-            if not is_valid:
-                logger.error(f"Dados inválidos: {message}")
-                return jsonify({'status': 'error', 'message': message}), 400
-        except Exception as e:
-            logger.error(f"Erro na validação de dados: {str(e)}")
-            return jsonify({'status': 'error', 'message': f"Erro na validação: {str(e)}"}), 400
+        logger.info(f"Dados extraídos do bundle: {type(extracted_data)}")
         
-        # Transformar os dados para o formato do Consumer com tratamento de erro
-        try:
-            consumer_data = transform_to_consumer_format(data)
+        # Se os dados extraídos forem um array, processar cada item
+        if isinstance(extracted_data, list):
+            results = []
+            for item in extracted_data:
+                # Transformar os dados para o formato do Consumer
+                consumer_data = transform_to_consumer_format(item)
+                if consumer_data:
+                    # Armazenar o pedido em cache para consultas futuras
+                    order_id = consumer_data['id']
+                    orders_cache[order_id] = consumer_data
+                    results.append({
+                        'id': order_id,
+                        'status': 'success',
+                        'message': 'Pedido processado com sucesso'
+                    })
+                else:
+                    results.append({
+                        'status': 'error',
+                        'message': 'Falha na transformação de dados'
+                    })
+            
+            # Retornar os resultados
+            logger.info(f"Processados {len(results)} pedidos do bundle")
+            return jsonify({
+                'status': 'success',
+                'message': f'Processados {len(results)} pedidos',
+                'results': results
+            })
+        else:
+            # Transformar os dados para o formato do Consumer
+            consumer_data = transform_to_consumer_format(extracted_data)
             if not consumer_data:
                 logger.error("Falha na transformação de dados")
                 return jsonify({'status': 'error', 'message': 'Falha na transformação de dados'}), 400
-        except Exception as e:
-            logger.error(f"Erro na transformação de dados: {str(e)}")
-            logger.error(traceback.format_exc())
-            return jsonify({'status': 'error', 'message': f"Erro na transformação: {str(e)}"}), 400
-        
-        # Armazenar o pedido em cache para consultas futuras
-        order_id = consumer_data['id']
-        orders_cache[order_id] = consumer_data
-        
-        # Retornar os dados transformados
-        logger.info(f"Pedido {order_id} processado com sucesso")
-        return jsonify({
-            'status': 'success',
-            'message': 'Pedido processado com sucesso',
-            'data': consumer_data
-        })
+            
+            # Armazenar o pedido em cache para consultas futuras
+            order_id = consumer_data['id']
+            orders_cache[order_id] = consumer_data
+            
+            # Retornar os dados transformados
+            logger.info(f"Pedido {order_id} processado com sucesso")
+            return jsonify({
+                'status': 'success',
+                'message': 'Pedido processado com sucesso',
+                'data': consumer_data
+            })
     
     except Exception as e:
         logger.error(f"Erro ao processar pedido: {str(e)}")
