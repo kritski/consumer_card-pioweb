@@ -21,7 +21,7 @@ def transform_order_data(order):
         # Adicione outros campos conforme usados no modelo do Make
     }
 
-@app.route('/webhook/orders', methods=['POST'])
+@app.route('/webhook/cardapioweb', methods=['POST'])
 def webhook_orders():
     order = request.get_json()
     pedido_id = str(order["id"])
