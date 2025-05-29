@@ -12,7 +12,6 @@ CONSUMER_API_TOKEN = 'pk_live_zT3r7Y!a9b#2DfLkW8QzM0XeP4nGpVt-7uC@HjLsEw9Rx1YvKm
 PEDIDOS_PENDENTES = {}
 
 def transform_order_data(order):
-    # customer phone como objeto
     customer = order.get("customer", {})
     phone = customer.get("phone", "")
     if isinstance(phone, str):
@@ -22,7 +21,6 @@ def transform_order_data(order):
     else:
         customer["phone"] = {"number": str(phone)}
 
-    # camelCase nos campos de itens e opções
     def fix_option(opt):
         return {
             "optionId": opt.get("option_id", opt.get("optionId")),
@@ -49,7 +47,6 @@ def transform_order_data(order):
 
     items = [fix_item(i) for i in order.get("items", [])]
 
-    # deliveryAddress seguro
     delivery = order.get("delivery", {})
     address = delivery.get("deliveryAddress") or order.get("delivery_address") or {}
 
@@ -126,7 +123,31 @@ def polling():
     if not verify_token(request): return abort(401)
     pedidos = list(PEDIDOS_PENDENTES.values())
     print(f"Polling: {len(pedidos)} pedidos pendentes para integração.")
-    return jsonify({"orders": pedidos})
+    # Testa TODOS os formatos conhecidos
+    return jsonify({
+        "orders": pedidos,
+        "items": pedidos,
+        "data": pedidos,
+        "result": pedidos,
+        "Pedidos": pedidos,
+        "Orders": pedidos,
+        "PedidosPendentes": pedidos,
+        "root": pedidos,
+        "rootArray": pedidos,
+        "PedidosJson": pedidos,
+        "ResultSet": pedidos,
+        "PedidosIntegracao": pedidos,
+        "PedidosCardapioWeb": pedidos,
+        "PedidosFull": pedidos
+    })
+
+@app.route('/api/parceiro/polling_raw', methods=['GET'])
+def polling_raw():
+    if not verify_token(request): return abort(401)
+    pedidos = list(PEDIDOS_PENDENTES.values())
+    print(f"Polling [RAW]: {len(pedidos)} pedidos (array raiz).")
+    # Só o array puro (alguns clients antigos)
+    return jsonify(pedidos)
 
 @app.route('/api/parceiro/order/<order_id>', methods=['GET'])
 def get_order(order_id):
