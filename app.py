@@ -10,7 +10,7 @@ CARDAPIOWEB_TOKEN = 'avsj9dEaxd5YdYBW1bYjEycETsp87owQYu6Eh2J5'
 CARDAPIOWEB_MERCHANT = '14104'
 CONSUMER_API_TOKEN = 'pk_live_zT3r7Y!a9b#2DfLkW8QzM0XeP4nGpVt-7uC@HjLsEw9Rx1YvKmZBdNcTfUqAy'
 
-PEDIDOS = {}  # Em produção use Redis ou banco
+PEDIDOS = {}  # Em produção use Redis ou banco!!!
 
 def transform_order_data(order):
     payment = order["payments"][0] if order.get("payments") else {"payment_method": "", "payment_type":"", "total":0}
@@ -98,21 +98,33 @@ def update_cardapioweb_status(order_id, status):
     resp = requests.post(url, headers=headers, json=data)
     return resp.status_code in (200, 204)
 
-# === ROTA PARA RECEBER PEDIDO NOVO DO CARDAPIO WEB ===
+# === WEBHOOK DO CARDAPIO WEB (USANDO order_id PARA BUSCAR DETALHES) ===
 @app.route('/webhook/cardapioweb', methods=['POST'])
 def webhook_novo_pedido():
     raw = request.json
     print("DEBUG: Recebido no webhook:", raw)
-    # Tenta encontrar o pedido real dentro do payload (estructuras possíveis)
-    order = raw.get("order") or raw.get("data") or raw
-    if not order or not order.get("id"):
-        print("Erro: payload inesperado ou sem 'id'.")
-        return jsonify({"error": "Payload inesperado ou sem id", "debug": raw}), 400
-    PEDIDOS[str(order["id"])] = transform_order_data(order)
-    print(f"[Webhook] Pedido {order['id']} recebido/atualizado via webhook.")
+
+    # Esperado: order_id
+    order_id = raw.get("order_id")
+    if not order_id:
+        print("Erro: payload sem 'order_id'.")
+        return jsonify({"error": "Payload sem order_id", "debug": raw}), 400
+
+    # Buscar detalhes do pedido na API do CardápioWeb:
+    url = f"{CARDAPIOWEB_BASE}/orders/{order_id}"
+    headers = {'X-API-KEY': CARDAPIOWEB_TOKEN, 'Content-Type': 'application/json'}
+    params = {'merchant_id': CARDAPIOWEB_MERCHANT}
+    resp = requests.get(url, headers=headers, params=params)
+    if resp.status_code != 200:
+        print(f"Erro ao obter detalhes do pedido {order_id}: status {resp.status_code}")
+        return jsonify({"error": f"Erro ao buscar detalhes do pedido {order_id}"}), 500
+
+    order_full = resp.json()
+    PEDIDOS[str(order_id)] = transform_order_data(order_full)
+    print(f"[Webhook] Pedido {order_id} capturado e armazenado com sucesso.")
     return jsonify({"status": "recebido"})
 
-# === ENDPOINTS DE INTEGRAÇÃO PARA O CONSUMER ===
+# === INTEGRAÇÃO PARA O CONSUMER ===
 
 @app.route('/api/parceiro/polling', methods=['GET'])
 def api_polling():
