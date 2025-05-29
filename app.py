@@ -80,14 +80,17 @@ def verify_token():
     if request.path == '/health':
         return
     
-    # Verificar token no cabeçalho Authorization
+    # Verificar token no cabeçalho Xapikey (usado pelo Consumer)
+    xapi_key = request.headers.get('Xapikey')
+    if xapi_key:
+        logger.info(f"Token encontrado em Xapikey: {xapi_key}")
+        # Verificar diretamente se o Xapikey corresponde ao token esperado
+        if xapi_key == API_TOKEN or xapi_key == API_TOKEN.replace('Bearer ', ''):
+            logger.info("Token Xapikey validado com sucesso")
+            return  # Autenticação bem-sucedida, continuar com a requisição
+    
+    # Se não encontrar em Xapikey ou se for inválido, verificar Authorization
     auth_header = request.headers.get('Authorization')
-    
-    # Se não encontrar no Authorization, verificar no Xapikey
-    if not auth_header:
-        auth_header = request.headers.get('Xapikey')
-        logger.info(f"Token encontrado em Xapikey: {auth_header}")
-    
     is_valid, message = verify_token_auth(auth_header)
     
     if not is_valid:
