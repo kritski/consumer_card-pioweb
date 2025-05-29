@@ -696,18 +696,21 @@ def polling():
                 # Garantir que cada item tenha os campos obrigatórios
                 if isinstance(item, dict):
                     order_id = str(item.get('id', str(uuid.uuid4())))
+                    display_id = str(item.get('display_id', item.get('displayId', '')))
                     created_at = item.get('createdAt', item.get('created_at', datetime.now(timezone.utc).isoformat()))
                     
                     # Formatar data no formato UTC ISO 8601
                     if not created_at.endswith('Z') and not '+' in created_at and not '-' in created_at[-6:]:
                         created_at = f"{created_at}Z"
                     
+                    # Criar item de polling no formato EXATO esperado pelo Consumer
                     polling_item = {
                         "id": order_id,
                         "orderId": order_id,
                         "createdAt": created_at,
                         "fullCode": "PLACED",
-                        "code": "PLC"
+                        "code": "PLC",
+                        "statusCode": 0  # Importante: statusCode deve ser um número inteiro
                     }
                     polling_items.append(polling_item)
             
