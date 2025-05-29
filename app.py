@@ -10,10 +10,11 @@ CARDAPIOWEB_TOKEN = 'avsj9dEaxd5YdYBW1bYjEycETsp87owQYu6Eh2J5'
 CARDAPIOWEB_MERCHANT = '14104'
 CONSUMER_API_TOKEN = 'pk_live_zT3r7Y!a9b#2DfLkW8QzM0XeP4nGpVt-7uC@HjLsEw9Rx1YvKmZBdNcTfUqAy'
 
-PEDIDOS = {}  # Em produção use Redis ou banco persistente
+PEDIDOS = {}  # Em produção, use Redis ou banco persistente.
 
 def transform_order_data(order):
     payment = order["payments"][0] if order.get("payments") else {"payment_method":"", "payment_type":"", "total":0}
+    address = order.get("delivery_address") or {}
     return {
         "id": str(order["id"]),
         "displayId": str(order.get("display_id", "")),
@@ -45,11 +46,11 @@ def transform_order_data(order):
             "prepaid": payment.get("total", 0)
         },
         "customer": {
-            "id": str(order["customer"].get("id", "")),
-            "name": order["customer"].get("name", ""),
+            "id": str(order.get("customer", {}).get("id", "")),
+            "name": order.get("customer", {}).get("name", ""),
             "phone": {
-                "number": order["customer"].get("phone", ""),
-                "localizer": order["customer"].get("phone", ""),
+                "number": order.get("customer", {}).get("phone", ""),
+                "localizer": order.get("customer", {}).get("phone", ""),
                 "localizerExpiration": (datetime.utcnow() + timedelta(days=1)).isoformat() + "Z"
             },
             "documentNumber": None
@@ -61,14 +62,14 @@ def transform_order_data(order):
             "deliveryDateTime": datetime.utcnow().isoformat() + "Z",
             "deliveryAddress": {
                 "country": "Brasil",
-                "state": order["delivery_address"].get("state", ""),
-                "city": order["delivery_address"].get("city", ""),
-                "postalCode": order["delivery_address"].get("postal_code", ""),
-                "streetName": order["delivery_address"].get("street", ""),
-                "streetNumber": order["delivery_address"].get("number", ""),
-                "neighborhood": order["delivery_address"].get("neighborhood", ""),
-                "complement": order["delivery_address"].get("complement", ""),
-                "reference": order["delivery_address"].get("reference", "")
+                "state": address.get("state", ""),
+                "city": address.get("city", ""),
+                "postalCode": address.get("postal_code", ""),
+                "streetName": address.get("street", ""),
+                "streetNumber": address.get("number", ""),
+                "neighborhood": address.get("neighborhood", ""),
+                "complement": address.get("complement", ""),
+                "reference": address.get("reference", "")
             }
         },
         "items": [
@@ -124,11 +125,10 @@ def webhook_novo_pedido():
     print(f"[Webhook] Pedido {order_id} capturado e armazenado com sucesso.")
     return jsonify({"status": "recebido"})
 
-# === ENDPOINT POLLING PARA O CONSUMER (agora no novo formato) ===
+# === ENDPOINT POLLING PARA O CONSUMER (formato certo) ===
 @app.route('/api/parceiro/polling', methods=['GET'])
 def api_polling():
     if not verify_consumer_token(request): return abort(401)
-    # O Consumer espera o campo items
     items = []
     for order_id, pedido in PEDIDOS.items():
         items.append({
@@ -136,7 +136,7 @@ def api_polling():
             "orderId": str(order_id),
             "createdAt": pedido.get("createdAt"),
             "fullCode": pedido.get("status", "PLACED"),
-            "code": "PLC"  # Código simplificado para status PLACED; adapte conforme necessário
+            "code": "PLC"  # Adapte conforme status real na sua operação!
         })
     print("[DEBUG][POLLING] ids entregues para o consumer:", [i["id"] for i in items])
     return jsonify({
