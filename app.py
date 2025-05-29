@@ -1,65 +1,34 @@
 from flask import Flask, request, jsonify, abort
-from datetime import datetime, timedelta
+from datetime import datetime
 import requests
 
 app = Flask(__name__)
 
-# === CONFIGURAÇÕES ===
+# Configurações Cardápio Web
 CARDAPIOWEB_BASE = 'https://integracao.cardapioweb.com/api/partner/v1'
 CARDAPIOWEB_TOKEN = 'avsj9dEaxd5YdYBW1bYjEycETsp87owQYu6Eh2J5'
 CARDAPIOWEB_MERCHANT = '14104'
 CONSUMER_API_TOKEN = 'pk_live_zT3r7Y!a9b#2DfLkW8QzM0XeP4nGpVt-7uC@HjLsEw9Rx1YvKmZBdNcTfUqAy'
 
-PEDIDOS = {}  # Em produção, use Redis ou banco persistente.
+# Banco simples (em memória)
+PEDIDOS_PENDENTES = {}
 
 def transform_order_data(order):
-    payment = order["payments"][0] if order.get("payments") else {"payment_method":"", "payment_type":"", "total":0}
+    payment = order["payments"][0] if order.get("payments") else {"payment_method": "", "payment_type": "", "total": 0}
     address = order.get("delivery_address") or {}
     return {
-        "id": str(order["id"]),
+        "id": str(order.get("id")),
         "displayId": str(order.get("display_id", "")),
-        "status": order.get("status", "PLACED"),
         "orderType": order.get("order_type", "").upper(),
         "salesChannel": order.get("sales_channel", "").upper(),
         "orderTiming": order.get("order_timing", "").upper(),
-        "createdAt": order.get("created_at", ""),
-        "preparationStartDateTime": datetime.utcnow().isoformat() + "Z",
-        "merchant": {
-            "id": str(order.get("merchant_id", "")),
-            "name": "Seu Restaurante"
-        },
-        "total": {
-            "subTotal": 0,
-            "deliveryFee": 0,
-            "orderAmount": order.get("total", 0),
-            "benefits": 0,
-            "additionalFees": 0
-        },
-        "payments": {
-            "methods": [{
-                "method": payment.get("payment_method", ""),
-                "type": payment.get("payment_type", ""),
-                "currency": "BRL",
-                "value": payment.get("total", 0)
-            }],
-            "pending": 0,
-            "prepaid": payment.get("total", 0)
-        },
-        "customer": {
-            "id": str(order.get("customer", {}).get("id", "")),
-            "name": order.get("customer", {}).get("name", ""),
-            "phone": {
-                "number": order.get("customer", {}).get("phone", ""),
-                "localizer": order.get("customer", {}).get("phone", ""),
-                "localizerExpiration": (datetime.utcnow() + timedelta(days=1)).isoformat() + "Z"
-            },
-            "documentNumber": None
-        },
+        "createdAt": order.get("created_at", datetime.utcnow().isoformat()),
+        "customer": order.get("customer", {}),
         "delivery": {
-            "mode": "EXPRESS",
+            "mode": order.get("delivered_by") or "EXPRESS",
             "deliveredBy": order.get("delivered_by", ""),
             "pickupCode": None,
-            "deliveryDateTime": datetime.utcnow().isoformat() + "Z",
+            "deliveryDateTime": order.get("created_at", datetime.utcnow().isoformat()),
             "deliveryAddress": {
                 "country": "Brasil",
                 "state": address.get("state", ""),
@@ -72,101 +41,90 @@ def transform_order_data(order):
                 "reference": address.get("reference", "")
             }
         },
-        "items": [
-            {
-                "id": str(item.get("item_id", "")),
-                "externalCode": item.get("external_code", ""),
-                "name": item.get("name", ""),
-                "quantity": item.get("quantity", 0),
-                "unitPrice": item.get("unit_price", 0),
-                "totalPrice": item.get("total_price", 0),
-                "observations": item.get("observation", ""),
-                "options": item.get("options", [])
-            } for item in order.get("items", [])
-        ]
+        "items": order.get("items", []),
+        "merchant": {
+            "id": str(order.get("merchant_id", "")),
+            "name": "Seu Restaurante"
+        },
+        "total": {
+            "subTotal": 0,
+            "deliveryFee": order.get("delivery_fee", 0),
+            "orderAmount": order.get("total", 0),
+            "benefits": 0,
+            "additionalFees": 0
+        },
+        "payments": {
+            "methods": [{
+                "method": payment.get("payment_method", ""),
+                "type": payment.get("payment_type", ""),
+                "value": payment.get("total", 0),
+                "currency": "BRL",
+            }],
+            "pending": 0,
+            "prepaid": payment.get("total", 0)
+        },
     }
 
-def verify_consumer_token(request):
+def verify_token(request):
     token1 = request.headers.get("Xapikey")
     token2 = request.headers.get("Authorization")
     if token1 == CONSUMER_API_TOKEN or (token2 and token2.split()[-1] == CONSUMER_API_TOKEN):
         return True
     return False
 
-def update_cardapioweb_status(order_id, status):
-    url = f"{CARDAPIOWEB_BASE}/orders/{order_id}/status"
-    headers = {'X-API-KEY': CARDAPIOWEB_TOKEN, 'Content-Type': 'application/json'}
-    data = {'status': status}
-    resp = requests.post(url, headers=headers, json=data)
-    return resp.status_code in (200, 204)
-
-# === WEBHOOK DO CARDAPIO WEB ===
+# --- Aceita ambos endpoints: compatível com o Consumer e o Cardápio ---
+@app.route('/webhook/orders', methods=['POST'])
 @app.route('/webhook/cardapioweb', methods=['POST'])
-def webhook_novo_pedido():
-    raw = request.json
-    print("DEBUG: Recebido no webhook:", raw)
+def webhook_orders():
+    event = request.get_json()
+    print("DEBUG: Recebido no webhook:", event)
 
-    order_id = raw.get("order_id")
+    # Primeiro tenta 'id' (Make), se não, tenta 'order_id' (Cardápio Web)
+    order_id = event.get("id") or event.get("order_id")
     if not order_id:
-        print("Erro: payload sem 'order_id'.")
-        return jsonify({"error": "Payload sem order_id", "debug": raw}), 400
+        return jsonify({"error": "Payload inesperado, sem id/order_id", "raw": event}), 400
 
-    # Buscar detalhes completos do pedido no Cardápio Web
-    url = f"{CARDAPIOWEB_BASE}/orders/{order_id}"
-    headers = {'X-API-KEY': CARDAPIOWEB_TOKEN, 'Content-Type': 'application/json'}
-    params = {'merchant_id': CARDAPIOWEB_MERCHANT}
-    resp = requests.get(url, headers=headers, params=params)
-    if resp.status_code != 200:
-        print(f"Erro ao obter detalhes do pedido {order_id}: status {resp.status_code}")
-        return jsonify({"error": f"Erro ao buscar detalhes do pedido {order_id}"}), 500
+    # Se só tiver order_id, buscar detalhes completos na API CardápioWeb
+    if "order_id" in event and len(event.keys()) <= 6:
+        url = f"{CARDAPIOWEB_BASE}/orders/{order_id}"
+        headers = {"X-API-KEY": CARDAPIOWEB_TOKEN, "Content-Type": "application/json"}
+        params = {"merchant_id": CARDAPIOWEB_MERCHANT}
+        resp = requests.get(url, headers=headers, params=params)
+        if resp.status_code != 200:
+            print("Erro ao buscar detalhes para o pedido:", order_id, "Status:", resp.status_code)
+            return jsonify({"error": "Falha ao obter detalhes"}), 500
+        order = resp.json()
+    else:
+        order = event
 
-    order_full = resp.json()
-    PEDIDOS[str(order_id)] = transform_order_data(order_full)
-    print(f"[Webhook] Pedido {order_id} capturado e armazenado com sucesso.")
-    return jsonify({"status": "recebido"})
+    pedido_transformado = transform_order_data(order)
+    PEDIDOS_PENDENTES[str(order_id)] = pedido_transformado
+    print(f"Pedido {order_id} capturado via webhook e armazenado.")
+    return jsonify({"success": True})
 
-# === ENDPOINT POLLING PARA O CONSUMER (formato certo) ===
 @app.route('/api/parceiro/polling', methods=['GET'])
-def api_polling():
-    if not verify_consumer_token(request): return abort(401)
-    items = []
-    for order_id, pedido in PEDIDOS.items():
-        items.append({
-            "id": str(order_id),
-            "orderId": str(order_id),
-            "createdAt": pedido.get("createdAt"),
-            "fullCode": pedido.get("status", "PLACED"),
-            "code": "PLC"  # Adapte conforme status real na sua operação!
-        })
-    print("[DEBUG][POLLING] ids entregues para o consumer:", [i["id"] for i in items])
-    return jsonify({
-        "items": items,
-        "statusCode": 0,
-        "reasonPhrase": None
-    })
+def polling():
+    if not verify_token(request): return abort(401)
+    pedidos = list(PEDIDOS_PENDENTES.values())
+    print(f"Polling: {len(pedidos)} pedidos pendentes para integração.")
+    return jsonify({"orders": pedidos})
 
-# === DETALHES DO PEDIDO PARA O CONSUMER ===
 @app.route('/api/parceiro/order/<order_id>', methods=['GET'])
-def api_order_details(order_id):
-    if not verify_consumer_token(request): return abort(401)
-    pedido = PEDIDOS.get(order_id)
-    if not pedido:
-        print(f"Tentativa de buscar pedido {order_id} não encontrado.")
-        return abort(404)
-    return jsonify(pedido)
+def get_order(order_id):
+    if not verify_token(request): return abort(401)
+    pedido = PEDIDOS_PENDENTES.get(order_id)
+    if pedido:
+        return jsonify(pedido)
+    return jsonify({"error": "Pedido não encontrado"}), 404
 
-# === ATUALIZAÇÃO DE STATUS (POST) ===
 @app.route('/api/parceiro/order/<order_id>', methods=['POST'])
-def api_update_status(order_id):
-    if not verify_consumer_token(request): return abort(401)
-    data = request.json
-    new_status = data.get("status") or data.get("action")
-    if not new_status:
-        return abort(400)
-    if order_id in PEDIDOS:
-        PEDIDOS[order_id]['status'] = new_status
-    ok = update_cardapioweb_status(order_id, new_status)
-    return jsonify({"status": "CardapioWeb atualizado" if ok else "Erro CardapioWeb"})
+def integrar_order(order_id):
+    if not verify_token(request): return abort(401)
+    if order_id in PEDIDOS_PENDENTES:
+        PEDIDOS_PENDENTES.pop(order_id)
+        print(f"Pedido {order_id} removido da fila/considerado integrado.")
+        return jsonify({"success": True})
+    return jsonify({"error": "Pedido não encontrado"}), 404
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     app.run()
