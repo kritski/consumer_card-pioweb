@@ -10,13 +10,14 @@ CARDAPIOWEB_TOKEN = 'avsj9dEaxd5YdYBW1bYjEycETsp87owQYu6Eh2J5'
 CARDAPIOWEB_MERCHANT = '14104'
 CONSUMER_API_TOKEN = 'pk_live_zT3r7Y!a9b#2DfLkW8QzM0XeP4nGpVt-7uC@HjLsEw9Rx1YvKmZBdNcTfUqAy'
 
-PEDIDOS = {}  # Em produção use Redis ou banco!!!
+PEDIDOS = {}  # Em produção use Redis ou banco persistente
 
 def transform_order_data(order):
-    payment = order["payments"][0] if order.get("payments") else {"payment_method": "", "payment_type":"", "total":0}
+    payment = order["payments"][0] if order.get("payments") else {"payment_method":"", "payment_type":"", "total":0}
     return {
         "id": str(order["id"]),
         "displayId": str(order.get("display_id", "")),
+        "status": order.get("status", "PLACED"),
         "orderType": order.get("order_type", "").upper(),
         "salesChannel": order.get("sales_channel", "").upper(),
         "orderTiming": order.get("order_timing", "").upper(),
@@ -98,19 +99,18 @@ def update_cardapioweb_status(order_id, status):
     resp = requests.post(url, headers=headers, json=data)
     return resp.status_code in (200, 204)
 
-# === WEBHOOK DO CARDAPIO WEB (USANDO order_id PARA BUSCAR DETALHES) ===
+# === WEBHOOK DO CARDAPIO WEB ===
 @app.route('/webhook/cardapioweb', methods=['POST'])
 def webhook_novo_pedido():
     raw = request.json
     print("DEBUG: Recebido no webhook:", raw)
 
-    # Esperado: order_id
     order_id = raw.get("order_id")
     if not order_id:
         print("Erro: payload sem 'order_id'.")
         return jsonify({"error": "Payload sem order_id", "debug": raw}), 400
 
-    # Buscar detalhes do pedido na API do CardápioWeb:
+    # Buscar detalhes completos do pedido no Cardápio Web
     url = f"{CARDAPIOWEB_BASE}/orders/{order_id}"
     headers = {'X-API-KEY': CARDAPIOWEB_TOKEN, 'Content-Type': 'application/json'}
     params = {'merchant_id': CARDAPIOWEB_MERCHANT}
@@ -124,14 +124,28 @@ def webhook_novo_pedido():
     print(f"[Webhook] Pedido {order_id} capturado e armazenado com sucesso.")
     return jsonify({"status": "recebido"})
 
-# === INTEGRAÇÃO PARA O CONSUMER ===
-
+# === ENDPOINT POLLING PARA O CONSUMER (agora no novo formato) ===
 @app.route('/api/parceiro/polling', methods=['GET'])
 def api_polling():
     if not verify_consumer_token(request): return abort(401)
-    print("[DEBUG] Pedidos no polling:", list(PEDIDOS.keys()))
-    return jsonify({"orders": list(PEDIDOS.values())})
+    # O Consumer espera o campo items
+    items = []
+    for order_id, pedido in PEDIDOS.items():
+        items.append({
+            "id": str(order_id),
+            "orderId": str(order_id),
+            "createdAt": pedido.get("createdAt"),
+            "fullCode": pedido.get("status", "PLACED"),
+            "code": "PLC"  # Código simplificado para status PLACED; adapte conforme necessário
+        })
+    print("[DEBUG][POLLING] ids entregues para o consumer:", [i["id"] for i in items])
+    return jsonify({
+        "items": items,
+        "statusCode": 0,
+        "reasonPhrase": None
+    })
 
+# === DETALHES DO PEDIDO PARA O CONSUMER ===
 @app.route('/api/parceiro/order/<order_id>', methods=['GET'])
 def api_order_details(order_id):
     if not verify_consumer_token(request): return abort(401)
@@ -141,6 +155,7 @@ def api_order_details(order_id):
         return abort(404)
     return jsonify(pedido)
 
+# === ATUALIZAÇÃO DE STATUS (POST) ===
 @app.route('/api/parceiro/order/<order_id>', methods=['POST'])
 def api_update_status(order_id):
     if not verify_consumer_token(request): return abort(401)
