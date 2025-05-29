@@ -27,11 +27,20 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Configuração
-MAKE_WEBHOOK_URL = os.environ.get('MAKE_WEBHOOK_URL', 'https://hook.eu2.make.com/YOUR_WEBHOOK_ID')
+MAKE_WEBHOOK_URL = os.environ.get('MAKE_WEBHOOK_URL', 'https://hook.eu2.make.com/YOUR_WEBHOOK_ID' )
 API_TOKEN = os.environ.get('API_TOKEN', 'pk_live_zT3r7Y!a9b#2DfLkW8QzM0XeP4nGpVt-7uC@HjLsEw9Rx1YvKmZBdNcTfUqAy')
 
 # Armazenamento temporário de pedidos (em produção, use um banco de dados)
 orders_cache = {}
+
+# Adicionar logs para depuração de requisições
+@app.before_request
+def log_request_info():
+    if request.path != '/health':
+        logger.info(f"Recebendo requisição para: {request.path}")
+        logger.info(f"Headers: {dict(request.headers)}")
+        auth_header = request.headers.get('Authorization')
+        logger.info(f"Auth header: {auth_header}")
 
 # Função para validar o token de autenticação
 def verify_token_auth(auth_header):
@@ -42,16 +51,24 @@ def verify_token_auth(auth_header):
         return False, "Token não fornecido"
     
     try:
-        # Formato esperado: "Bearer TOKEN"
-        if not auth_header.startswith('Bearer '):
-            return False, "Formato de autenticação inválido"
+        # Verificar se o token já tem o prefixo "Bearer"
+        if auth_header.startswith('Bearer '):
+            token = auth_header.split(' ')[1]
+        else:
+            # Se não tiver o prefixo, usar o header completo como token
+            token = auth_header
         
-        token = auth_header.split(' ')[1]
-        if token != API_TOKEN:
+        # Verificar o token sem considerar o prefixo "Bearer"
+        clean_api_token = API_TOKEN.replace('Bearer ', '')
+        
+        if token != API_TOKEN and token != clean_api_token:
+            logger.warning(f"Token inválido recebido: {token}")
             return False, "Token inválido"
         
+        logger.info("Token validado com sucesso")
         return True, "Token válido"
-    except ValueError:
+    except Exception as e:
+        logger.error(f"Erro ao validar token: {str(e)}")
         return False, "Formato de autenticação inválido"
 
 # Middleware para verificar o token de autenticação
@@ -65,6 +82,7 @@ def verify_token():
     is_valid, message = verify_token_auth(auth_header)
     
     if not is_valid:
+        logger.warning(f"Falha na autenticação: {message}")
         return jsonify({'error': message}), 401
 
 # Função para validar os dados do pedido
