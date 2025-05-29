@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify, abort
-from datetime import datetime, timedelta
+from datetime import datetime
 import requests
 
 app = Flask(__name__)
@@ -9,11 +9,11 @@ CARDAPIOWEB_TOKEN = 'avsj9dEaxd5YdYBW1bYjEycETsp87owQYu6Eh2J5'
 CARDAPIOWEB_MERCHANT = '14104'
 CONSUMER_API_TOKEN = 'pk_live_zT3r7Y!a9b#2DfLkW8QzM0XeP4nGpVt-7uC@HjLsEw9Rx1YvKmZBdNcTfUqAy'
 
-# Estrutura: id -> {"pedido":pedido, "chegou_em":datetime}
+# id -> pedido
 PEDIDOS_PENDENTES = {}
 
 def agora():
-    return datetime.utcnow()
+    return datetime.utcnow().isoformat()
 
 def transform_order_data(order):
     customer = order.get("customer") or {}
@@ -24,6 +24,7 @@ def transform_order_data(order):
         customer["phone"] = phone
     else:
         customer["phone"] = {"number": str(phone)}
+
     def fix_option(opt):
         return {
             "optionId": opt.get("option_id", opt.get("optionId")),
@@ -35,6 +36,7 @@ def transform_order_data(order):
             "unitPrice": float(opt.get("unit_price", opt.get("unitPrice", 0))),
             "optionGroupTotalSelectedOptions": opt.get("option_group_total_selected_options", opt.get("optionGroupTotalSelectedOptions")),
         }
+
     def fix_item(item):
         return {
             "id": str(item.get("item_id", item.get("id", ""))),
@@ -46,12 +48,13 @@ def transform_order_data(order):
             "observations": item.get("observation", item.get("observations", "")),
             "options": [fix_option(opt) for opt in item.get("options", [])]
         }
+
     items = [fix_item(i) for i in order.get("items", [])]
     delivery = order.get("delivery", {})
     address = delivery.get("deliveryAddress") or order.get("delivery_address") or {}
     delivery_fixed = {
         "deliveredBy": delivery.get("deliveredBy", order.get("delivered_by", "")),
-        "deliveryDateTime": delivery.get("deliveryDateTime", order.get("created_at", agora().isoformat())),
+        "deliveryDateTime": delivery.get("deliveryDateTime", order.get("created_at", agora())),
         "mode": delivery.get("mode", order.get("delivered_by", "")),
         "pickupCode": delivery.get("pickupCode", None),
         "deliveryAddress": {
@@ -72,7 +75,7 @@ def transform_order_data(order):
         "orderType": order.get("order_type", "").upper(),
         "salesChannel": order.get("sales_channel", "").upper(),
         "orderTiming": order.get("order_timing", "").upper(),
-        "createdAt": order.get("created_at", agora().isoformat()),
+        "createdAt": order.get("created_at", agora()),
         "customer": customer,
         "delivery": delivery_fixed,
         "items": items,
@@ -115,46 +118,47 @@ def webhook_orders():
     else:
         order = event
     pedido_transformado = transform_order_data(order)
-    PEDIDOS_PENDENTES[str(order_id)] = {
-        "pedido": pedido_transformado,
-        "chegou_em": agora()
-    }
+    PEDIDOS_PENDENTES[str(order_id)] = pedido_transformado
     print(f"Pedido {order_id} capturado via webhook e armazenado.")
     return jsonify({"success": True})
 
 @app.route('/api/parceiro/polling', methods=['GET'])
 def polling():
     if not verify_token(request): return abort(401)
-    # Só pedidos não expirados nem já integrados
-    pedidos_ativos = [v["pedido"] for v in PEDIDOS_PENDENTES.values()]
-    print(f"Polling: {len(pedidos_ativos)} pedidos pendentes para integração.")
-    return jsonify({"orders": pedidos_ativos})
+    pedidos = list(PEDIDOS_PENDENTES.values())
+    for pedido in pedidos:
+        pedido["status"] = "NEW"
+        pedido["fullCode"] = "PLACED"
+        pedido["code"] = "PLC"
+    print(f"Polling: {len(pedidos)} pedidos pendentes [todos arrays simultâneos]")
+    return jsonify({
+        "orders": pedidos,
+        "Orders": pedidos,
+        "Pedidos": pedidos,
+        "items": pedidos,
+        "data": pedidos,
+        "result": pedidos,
+        "PedidosPendentes": pedidos,
+        "root": pedidos,
+        "PedidosFull": pedidos,
+        "PedidosJson": pedidos,
+        "ResultSet": pedidos,
+        "PedidosCardapioWeb": pedidos,
+        "PedidosIntegracao": pedidos,
+        "rootArray": pedidos
+    })
 
-@app.route('/api/parceiro/order/<order_id>', methods=['GET', 'POST'])
-def order_detail_or_integrate(order_id):
-    if not verify_token(request): return abort(401)
-    # Tenta pelo ID direto
-    obj = PEDIDOS_PENDENTES.get(order_id)
-    now = agora()
-    if obj:
-        pedido = obj["pedido"]
-        chegou_em = obj["chegou_em"]
-        # POST (integrar): remove
-        if request.method == 'POST':
-            del PEDIDOS_PENDENTES[order_id]
-            print(f"Pedido {order_id} removido da fila/considerado integrado (POST).")
-        return jsonify(pedido)
-    # BYPASS: se não acha pelo id e passaram mais de 40s, devolve o último pendente
-    ids = [k for k, v in PEDIDOS_PENDENTES.items() if (now-v["chegou_em"]).total_seconds() > 40]
+@app.route('/api/parceiro/order/<anyid>', methods=['GET', 'POST'])
+def orderid_literal_fallback(anyid):
+    ids = list(PEDIDOS_PENDENTES.keys())
+    print(f"[BYPASS] Handler /order/<anyid> chamado ({anyid}). Pedidos na fila: {ids}")
     if ids:
-        key = ids[-1]
-        pedido = PEDIDOS_PENDENTES[key]["pedido"]
+        pedido = PEDIDOS_PENDENTES[ids[-1]]
         if request.method == 'POST':
-            del PEDIDOS_PENDENTES[key]
-            print(f"Pedido (fallback {key}) removido da fila/considerado integrado (POST).")
-        print(f"Bypass do order_id, retornando o último pedido da fila: {key}")
+            PEDIDOS_PENDENTES.pop(ids[-1])
+            print(f"[BYPASS] Pedido removido após POST (integrado): {ids[-1]}")
         return jsonify(pedido)
-    return jsonify({"error": "Pedido não encontrado (nem pelo fallback)."}), 404
+    return jsonify({"error": "Nenhum pedido na fila (handler literal)."}), 404
 
 if __name__ == '__main__':
     app.run()
