@@ -33,17 +33,6 @@ API_TOKEN = os.environ.get('API_TOKEN', 'pk_live_zT3r7Y!a9b#2DfLkW8QzM0XeP4nGpVt
 # Armazenamento temporário de pedidos (em produção, use um banco de dados)
 orders_cache = {}
 
-# Adicionar logs para depuração de requisições
-@app.before_request
-def log_request_info():
-    if request.path != '/health':
-        logger.info(f"Recebendo requisição para: {request.path}")
-        logger.info(f"Headers: {dict(request.headers)}")
-        auth_header = request.headers.get('Authorization')
-        xapi_header = request.headers.get('Xapikey')
-        logger.info(f"Auth header: {auth_header}")
-        logger.info(f"Xapikey header: {xapi_header}")
-
 # Função para validar o token de autenticação
 def verify_token_auth(auth_header):
     """
@@ -53,24 +42,16 @@ def verify_token_auth(auth_header):
         return False, "Token não fornecido"
     
     try:
-        # Verificar se o token já tem o prefixo "Bearer"
-        if auth_header.startswith('Bearer '):
-            token = auth_header.split(' ')[1]
-        else:
-            # Se não tiver o prefixo, usar o header completo como token
-            token = auth_header
+        # Formato esperado: "Bearer TOKEN"
+        if not auth_header.startswith('Bearer '):
+            return False, "Formato de autenticação inválido"
         
-        # Verificar o token sem considerar o prefixo "Bearer"
-        clean_api_token = API_TOKEN.replace('Bearer ', '')
-        
-        if token != API_TOKEN and token != clean_api_token:
-            logger.warning(f"Token inválido recebido: {token}")
+        token = auth_header.split(' ')[1]
+        if token != API_TOKEN:
             return False, "Token inválido"
         
-        logger.info("Token validado com sucesso")
         return True, "Token válido"
-    except Exception as e:
-        logger.error(f"Erro ao validar token: {str(e)}")
+    except ValueError:
         return False, "Formato de autenticação inválido"
 
 # Middleware para verificar o token de autenticação
@@ -80,25 +61,26 @@ def verify_token():
     if request.path == '/health':
         return
     
-    # Verificar token no cabeçalho Xapikey (usado pelo Consumer)
-    xapi_key = request.headers.get('Xapikey')
-    if xapi_key:
-        logger.info(f"Token encontrado em Xapikey: {xapi_key}")
-        # Verificar diretamente se o Xapikey corresponde ao token esperado
-        clean_api_token = API_TOKEN.replace('Bearer ', '')
-        if xapi_key == API_TOKEN or xapi_key == clean_api_token:
-            logger.info("Token Xapikey validado com sucesso")
-            return  # Autenticação bem-sucedida, continuar com a requisição
-        else:
-            logger.warning(f"Token Xapikey inválido: {xapi_key}")
-    
-    # Se não encontrar em Xapikey ou se for inválido, verificar Authorization
     auth_header = request.headers.get('Authorization')
-    is_valid, message = verify_token_auth(auth_header)
+    xapikey_header = request.headers.get('Xapikey')
     
-    if not is_valid:
-        logger.warning(f"Falha na autenticação: {message}")
-        return jsonify({'error': message}), 401
+    logger.info(f"Auth header: {auth_header}")
+    logger.info(f"Xapikey header: {xapikey_header}")
+    
+    # Verificar primeiro o header Authorization
+    if auth_header:
+        is_valid, message = verify_token_auth(auth_header)
+        if is_valid:
+            logger.info("Token validado com sucesso")
+            return
+    
+    # Se não tiver Authorization válido, verificar Xapikey
+    if xapikey_header and xapikey_header == API_TOKEN:
+        logger.info("Token Xapikey validado com sucesso")
+        return
+    
+    # Se nenhum dos dois for válido, retornar erro
+    return jsonify({'error': 'Token inválido ou não fornecido'}), 401
 
 # Função para validar os dados do pedido
 def validate_order_data(data):
@@ -519,16 +501,27 @@ def transform_to_consumer_format(cardapio_order):
         item_unit_price = float(item.get('unitPrice', item.get('unit_price', 0)))
         item_total_price = float(item.get('totalPrice', item.get('total_price', item_unit_price * item_quantity)))
         
-        formatted_items.append({
+        # Extrair opções do item
+        options = item.get('options', [])
+        if isinstance(options, str):
+            try:
+                options = json.loads(options)
+            except:
+                options = []
+        
+        # Criar objeto de item no formato do Consumer
+        formatted_item = {
             "id": item_id,
-            "externalCode": item.get('externalCode', item.get('external_code', item_id)),
+            "externalCode": item.get('externalCode', item.get('external_code')),
             "name": item_name,
             "quantity": item_quantity,
             "unitPrice": item_unit_price,
             "totalPrice": item_total_price,
-            "observations": item.get('observations', item.get('observation', None)),
-            "options": item.get('options', [])
-        })
+            "observations": item.get('observation', item.get('observations')),
+            "options": options
+        }
+        
+        formatted_items.append(formatted_item)
     
     consumer_format["items"] = formatted_items
     
@@ -635,94 +628,94 @@ def receive_orders_from_make():
 # Endpoint de polling - Consumer busca pedidos novos
 @app.route('/api/parceiro/polling', methods=['GET'])
 def polling():
-    logger.info("Polling solicitado pelo Consumer")
+    """
+    Endpoint para polling de pedidos pelo Consumer
+    """
     try:
-        # CORREÇÃO: Ajustar o payload para o formato esperado pelo Make.com
+        logger.info("Polling solicitado pelo Consumer")
+        
+        # Preparar payload para o Make.com
         payload = {
-            'action': 'polling',
-            'timestamp': datetime.now().isoformat(),
-            'merchant_id': '14104'  # Adicionar merchant_id fixo para teste
+            "action": "polling",
+            "timestamp": datetime.now().isoformat(),
+            "merchant_id": "14104"  # ID do merchant no CardápioWeb
         }
         
-        logger.info(f"Enviando payload para Make.com: {json.dumps(payload)}")
+        logger.info(f"Enviando payload para Make.com: {payload}")
         
-        # Chamar o webhook do Make.com para buscar pedidos novos
+        # Chamar o webhook do Make.com para buscar pedidos
         response = requests.post(
             MAKE_WEBHOOK_URL,
             json=payload,
             headers={'Content-Type': 'application/json'}
         )
         
-        # Log da resposta completa para depuração
         logger.info(f"Resposta do Make.com: Status {response.status_code}")
         logger.info(f"Resposta do Make.com: Headers {dict(response.headers)}")
-        try:
-            response_text = response.text
-            logger.info(f"Resposta do Make.com: Body {response_text[:500]}...")  # Limitar para evitar logs muito grandes
-        except:
-            logger.info("Não foi possível logar o corpo da resposta")
+        logger.info(f"Resposta do Make.com: Body {response.text}")
         
         if response.status_code != 200:
             logger.error(f"Erro ao buscar pedidos no Make.com: {response.status_code}")
-            # Retornar uma lista vazia em vez de erro para evitar falhas no Consumer
+            # Retornar array vazio em vez de erro para o Consumer
             return jsonify([])
         
         # Processar a resposta do Make.com
         try:
             make_data = response.json()
-            logger.info(f"Dados recebidos do Make.com: {json.dumps(make_data, default=str)[:500]}...")
+            logger.info(f"Dados recebidos do Make.com: {make_data}")
+            
+            # Verificar se os dados estão no formato esperado pelo Consumer
+            # O Consumer espera um array de objetos, mesmo que vazio
+            if not isinstance(make_data, list):
+                logger.warning("Dados do Make.com não estão em formato de array, convertendo...")
+                
+                # Se make_data for um objeto com campo 'orders', usar esse campo
+                if isinstance(make_data, dict) and 'orders' in make_data:
+                    make_data = make_data.get('orders', [])
+                # Se make_data for um objeto com campo 'data', usar esse campo
+                elif isinstance(make_data, dict) and 'data' in make_data:
+                    data_field = make_data.get('data', {})
+                    # Se data_field for um objeto com campo 'items', usar esse campo
+                    if isinstance(data_field, dict) and 'items' in data_field:
+                        make_data = data_field.get('items', [])
+                    else:
+                        make_data = [data_field] if data_field else []
+                # Se make_data for um objeto sem campos especiais, converter para array
+                elif make_data:
+                    make_data = [make_data]
+                else:
+                    make_data = []
+            
+            # Formatar os dados no formato esperado pelo Consumer
+            polling_items = []
+            for item in make_data:
+                # Garantir que cada item tenha os campos obrigatórios
+                if isinstance(item, dict):
+                    order_id = str(item.get('id', str(uuid.uuid4())))
+                    polling_item = {
+                        "id": order_id,
+                        "orderId": order_id,
+                        "createdAt": item.get('createdAt', item.get('created_at', datetime.now().isoformat())),
+                        "fullCode": "PLACED",
+                        "code": "PLC",
+                        "statusCode": 0
+                    }
+                    polling_items.append(polling_item)
+            
+            logger.info(f"Retornando {len(polling_items)} itens para o Consumer")
+            # Retornar array de itens diretamente, sem encapsular em objeto
+            return jsonify(polling_items)
+        
         except Exception as e:
-            logger.error(f"Erro ao parsear resposta do Make.com: {str(e)}")
+            logger.error(f"Erro ao processar resposta do Make.com: {str(e)}")
+            logger.error(traceback.format_exc())
+            # Retornar array vazio em vez de erro para o Consumer
             return jsonify([])
-        
-        # Transformar os dados para o formato do Consumer
-        orders = []
-        
-        # Verificar se make_data tem o campo 'orders'
-        if 'orders' in make_data and isinstance(make_data['orders'], list):
-            for order in make_data['orders']:
-                consumer_order = transform_to_consumer_format(order)
-                if consumer_order:
-                    orders.append({
-                        'id': consumer_order['id'],
-                        'reference': consumer_order.get('displayId', ''),
-                        'status': 'PENDING'
-                    })
-                    # Armazenar o pedido em cache para consultas futuras
-                    orders_cache[consumer_order['id']] = consumer_order
-        else:
-            # Se não tiver o campo 'orders', tentar processar diretamente
-            if isinstance(make_data, list):
-                for order in make_data:
-                    consumer_order = transform_to_consumer_format(order)
-                    if consumer_order:
-                        orders.append({
-                            'id': consumer_order['id'],
-                            'reference': consumer_order.get('displayId', ''),
-                            'status': 'PENDING'
-                        })
-                        # Armazenar o pedido em cache para consultas futuras
-                        orders_cache[consumer_order['id']] = consumer_order
-            elif isinstance(make_data, dict):
-                # Tentar processar como um único pedido
-                consumer_order = transform_to_consumer_format(make_data)
-                if consumer_order:
-                    orders.append({
-                        'id': consumer_order['id'],
-                        'reference': consumer_order.get('displayId', ''),
-                        'status': 'PENDING'
-                    })
-                    # Armazenar o pedido em cache para consultas futuras
-                    orders_cache[consumer_order['id']] = consumer_order
-        
-        # Retornar os pedidos no formato esperado pelo Consumer
-        logger.info(f"Polling retornou {len(orders)} pedidos")
-        return jsonify(orders)
     
     except Exception as e:
-        logger.error(f"Erro no polling: {str(e)}")
+        logger.error(f"Erro ao fazer polling: {str(e)}")
         logger.error(traceback.format_exc())
-        # Retornar uma lista vazia em vez de erro para evitar falhas no Consumer
+        # Retornar array vazio em vez de erro para o Consumer
         return jsonify([])
 
 # Endpoint de detalhes do pedido - Consumer busca detalhes de um pedido específico
@@ -735,79 +728,57 @@ def get_order_details(order_id):
             logger.info(f"Pedido {order_id} encontrado em cache")
             return jsonify(orders_cache[order_id])
         
-        # CORREÇÃO: Ajustar o payload para o formato esperado pelo Make.com
-        payload = {
-            'action': 'get_order_details',
-            'order_id': order_id,
-            'timestamp': datetime.now().isoformat(),
-            'merchant_id': '14104'  # Adicionar merchant_id fixo para teste
-        }
-        
-        logger.info(f"Enviando payload para Make.com: {json.dumps(payload)}")
-        
         # Se não estiver em cache, buscar no Make.com
         response = requests.post(
             MAKE_WEBHOOK_URL,
-            json=payload,
+            json={
+                'action': 'get_order_details',
+                'order_id': order_id,
+                'timestamp': datetime.now().isoformat(),
+                'merchant_id': '14104'  # ID do merchant no CardápioWeb
+            },
             headers={'Content-Type': 'application/json'}
         )
         
-        # Log da resposta completa para depuração
         logger.info(f"Resposta do Make.com: Status {response.status_code}")
         logger.info(f"Resposta do Make.com: Headers {dict(response.headers)}")
-        try:
-            response_text = response.text
-            logger.info(f"Resposta do Make.com: Body {response_text[:500]}...")
-        except:
-            logger.info("Não foi possível logar o corpo da resposta")
+        logger.info(f"Resposta do Make.com: Body {response.text}")
         
         if response.status_code != 200:
             logger.error(f"Erro ao buscar detalhes do pedido no Make.com: {response.status_code}")
-            # Retornar um objeto vazio em vez de erro para evitar falhas no Consumer
-            return jsonify({
-                'id': order_id,
-                'status': 'NOT_FOUND',
-                'error': f"Pedido não encontrado: {order_id}"
-            })
+            return jsonify({}), 404
         
         # Processar a resposta do Make.com
         try:
             make_data = response.json()
-            logger.info(f"Dados recebidos do Make.com: {json.dumps(make_data, default=str)[:500]}...")
+            logger.info(f"Dados recebidos do Make.com: {make_data}")
+            
+            # Se make_data for um objeto com campo 'data', usar esse campo
+            if isinstance(make_data, dict) and 'data' in make_data:
+                make_data = make_data.get('data', {})
+            
+            # Transformar os dados para o formato do Consumer
+            consumer_data = transform_to_consumer_format(make_data)
+            if not consumer_data:
+                logger.error(f"Falha na transformação de dados para o pedido {order_id}")
+                return jsonify({}), 404
+            
+            # Armazenar o pedido em cache para consultas futuras
+            orders_cache[order_id] = consumer_data
+            
+            # Retornar os dados transformados
+            logger.info(f"Detalhes do pedido {order_id} retornados com sucesso")
+            return jsonify(consumer_data)
+        
         except Exception as e:
-            logger.error(f"Erro ao parsear resposta do Make.com: {str(e)}")
-            return jsonify({
-                'id': order_id,
-                'status': 'ERROR',
-                'error': f"Erro ao processar resposta: {str(e)}"
-            })
-        
-        # Transformar os dados para o formato do Consumer
-        consumer_data = transform_to_consumer_format(make_data)
-        if not consumer_data:
-            logger.error(f"Falha na transformação de dados para o pedido {order_id}")
-            return jsonify({
-                'id': order_id,
-                'status': 'ERROR',
-                'error': "Falha na transformação de dados"
-            })
-        
-        # Armazenar o pedido em cache para consultas futuras
-        orders_cache[order_id] = consumer_data
-        
-        # Retornar os dados transformados
-        logger.info(f"Detalhes do pedido {order_id} retornados com sucesso")
-        return jsonify(consumer_data)
+            logger.error(f"Erro ao processar resposta do Make.com: {str(e)}")
+            logger.error(traceback.format_exc())
+            return jsonify({}), 404
     
     except Exception as e:
         logger.error(f"Erro ao obter detalhes do pedido: {str(e)}")
         logger.error(traceback.format_exc())
-        # Retornar um objeto com informações de erro
-        return jsonify({
-            'id': order_id,
-            'status': 'ERROR',
-            'error': str(e)
-        })
+        return jsonify({}), 500
 
 # Endpoint de mudança de status - Consumer atualiza o status de um pedido
 @app.route('/api/parceiro/order/<order_id>', methods=['POST'])
@@ -816,149 +787,75 @@ def update_order_status(order_id):
     try:
         # Obter os dados da requisição
         status_data = request.json
-        logger.info(f"Dados de status recebidos: {json.dumps(status_data, default=str)}")
-        
-        # CORREÇÃO: Ajustar o payload para o formato esperado pelo Make.com
-        payload = {
-            'action': 'update_status',
-            'order_id': order_id,
-            'status': status_data,
-            'timestamp': datetime.now().isoformat(),
-            'merchant_id': '14104'  # Adicionar merchant_id fixo para teste
-        }
-        
-        logger.info(f"Enviando payload para Make.com: {json.dumps(payload)}")
+        logger.info(f"Dados de status recebidos: {status_data}")
         
         # Chamar o webhook do Make.com para atualizar o status do pedido
         response = requests.post(
             MAKE_WEBHOOK_URL,
-            json=payload,
+            json={
+                'action': 'update_order_status',
+                'order_id': order_id,
+                'status': status_data.get('status'),
+                'timestamp': datetime.now().isoformat(),
+                'merchant_id': '14104'  # ID do merchant no CardápioWeb
+            },
             headers={'Content-Type': 'application/json'}
         )
         
-        # Log da resposta completa para depuração
         logger.info(f"Resposta do Make.com: Status {response.status_code}")
         logger.info(f"Resposta do Make.com: Headers {dict(response.headers)}")
-        try:
-            response_text = response.text
-            logger.info(f"Resposta do Make.com: Body {response_text[:500]}...")
-        except:
-            logger.info("Não foi possível logar o corpo da resposta")
+        logger.info(f"Resposta do Make.com: Body {response.text}")
         
         if response.status_code != 200:
-            logger.error(f"Erro ao atualizar status do pedido no Make.com: {response.status_code}")
-            # Retornar sucesso mesmo com erro para evitar falhas no Consumer
-            return jsonify({
-                'success': True,
-                'message': 'Status do pedido atualizado com sucesso (simulado)',
-                'warning': f"Erro na comunicação com Make.com: {response.status_code}"
-            })
+            logger.error(f"Erro ao atualizar status no Make.com: {response.status_code}")
+            return jsonify({'error': 'Erro ao atualizar status no Make.com'}), 500
         
-        # Processar a resposta do Make.com
-        try:
-            make_data = response.json()
-            logger.info(f"Dados recebidos do Make.com: {json.dumps(make_data, default=str)[:500]}...")
-        except Exception as e:
-            logger.error(f"Erro ao parsear resposta do Make.com: {str(e)}")
-            # Retornar sucesso mesmo com erro para evitar falhas no Consumer
-            return jsonify({
-                'success': True,
-                'message': 'Status do pedido atualizado com sucesso (simulado)',
-                'warning': f"Erro ao processar resposta: {str(e)}"
-            })
-        
-        # Retornar a confirmação no formato esperado pelo Consumer
-        logger.info(f"Status do pedido atualizado com sucesso: {order_id}")
-        return jsonify({
-            'success': True,
-            'message': 'Status do pedido atualizado com sucesso',
-            'data': make_data
-        })
+        # Retornar sucesso
+        logger.info(f"Status do pedido {order_id} atualizado com sucesso")
+        return jsonify({'status': 'success', 'message': 'Status atualizado com sucesso'})
     
     except Exception as e:
         logger.error(f"Erro ao atualizar status do pedido: {str(e)}")
         logger.error(traceback.format_exc())
-        # Retornar sucesso mesmo com erro para evitar falhas no Consumer
-        return jsonify({
-            'success': True,
-            'message': 'Status do pedido atualizado com sucesso (simulado)',
-            'warning': f"Erro interno: {str(e)}"
-        })
+        return jsonify({'error': str(e)}), 500
 
-# Endpoint para envio de detalhes do pedido
+# Endpoint para receber detalhes do pedido do Consumer
 @app.route('/api/infoOrderDetail', methods=['POST'])
-def info_order_detail():
+def receive_order_details():
     logger.info("Recebendo detalhes do pedido do Consumer")
     try:
         # Obter os dados da requisição
-        order_data = request.json
-        logger.info(f"Dados recebidos: {json.dumps(order_data, default=str)[:500]}...")
-        
-        # CORREÇÃO: Ajustar o payload para o formato esperado pelo Make.com
-        payload = {
-            'action': 'info_order_detail',
-            'order_data': order_data,
-            'timestamp': datetime.now().isoformat(),
-            'merchant_id': '14104'  # Adicionar merchant_id fixo para teste
-        }
-        
-        logger.info(f"Enviando payload para Make.com: {json.dumps(payload)}")
+        order_details = request.json
+        logger.info(f"Detalhes do pedido recebidos: {order_details}")
         
         # Chamar o webhook do Make.com para enviar os detalhes do pedido
         response = requests.post(
             MAKE_WEBHOOK_URL,
-            json=payload,
+            json={
+                'action': 'receive_order_details',
+                'order_details': order_details,
+                'timestamp': datetime.now().isoformat(),
+                'merchant_id': '14104'  # ID do merchant no CardápioWeb
+            },
             headers={'Content-Type': 'application/json'}
         )
         
-        # Log da resposta completa para depuração
         logger.info(f"Resposta do Make.com: Status {response.status_code}")
         logger.info(f"Resposta do Make.com: Headers {dict(response.headers)}")
-        try:
-            response_text = response.text
-            logger.info(f"Resposta do Make.com: Body {response_text[:500]}...")
-        except:
-            logger.info("Não foi possível logar o corpo da resposta")
+        logger.info(f"Resposta do Make.com: Body {response.text}")
         
         if response.status_code != 200:
-            logger.error(f"Erro ao enviar detalhes do pedido para o Make.com: {response.status_code}")
-            # Retornar sucesso mesmo com erro para evitar falhas no Consumer
-            return jsonify({
-                'success': True,
-                'message': 'Detalhes do pedido enviados com sucesso (simulado)',
-                'warning': f"Erro na comunicação com Make.com: {response.status_code}"
-            })
+            logger.error(f"Erro ao enviar detalhes para o Make.com: {response.status_code}")
+            return jsonify({'error': 'Erro ao enviar detalhes para o Make.com'}), 500
         
-        # Processar a resposta do Make.com
-        try:
-            make_data = response.json()
-            logger.info(f"Dados recebidos do Make.com: {json.dumps(make_data, default=str)[:500]}...")
-        except Exception as e:
-            logger.error(f"Erro ao parsear resposta do Make.com: {str(e)}")
-            # Retornar sucesso mesmo com erro para evitar falhas no Consumer
-            return jsonify({
-                'success': True,
-                'message': 'Detalhes do pedido enviados com sucesso (simulado)',
-                'warning': f"Erro ao processar resposta: {str(e)}"
-            })
-        
-        # Retornar a confirmação
+        # Retornar sucesso
         logger.info("Detalhes do pedido enviados com sucesso")
-        return jsonify({
-            'success': True,
-            'message': 'Detalhes do pedido enviados com sucesso',
-            'data': make_data
-        })
+        return jsonify({'status': 'success', 'message': 'Detalhes do pedido recebidos com sucesso'})
     
     except Exception as e:
-        logger.error(f"Erro ao enviar detalhes do pedido: {str(e)}")
+        logger.error(f"Erro ao receber detalhes do pedido: {str(e)}")
         logger.error(traceback.format_exc())
-        # Retornar sucesso mesmo com erro para evitar falhas no Consumer
-        return jsonify({
-            'success': True,
-            'message': 'Detalhes do pedido enviados com sucesso (simulado)',
-            'warning': f"Erro interno: {str(e)}"
-        })
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
