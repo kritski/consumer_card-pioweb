@@ -4,18 +4,73 @@ import requests
 
 app = Flask(__name__)
 
-# Configurações Cardápio Web
 CARDAPIOWEB_BASE = 'https://integracao.cardapioweb.com/api/partner/v1'
 CARDAPIOWEB_TOKEN = 'avsj9dEaxd5YdYBW1bYjEycETsp87owQYu6Eh2J5'
 CARDAPIOWEB_MERCHANT = '14104'
 CONSUMER_API_TOKEN = 'pk_live_zT3r7Y!a9b#2DfLkW8QzM0XeP4nGpVt-7uC@HjLsEw9Rx1YvKmZBdNcTfUqAy'
 
-# Banco simples (em memória)
 PEDIDOS_PENDENTES = {}
 
 def transform_order_data(order):
-    payment = order["payments"][0] if order.get("payments") else {"payment_method": "", "payment_type": "", "total": 0}
-    address = order.get("delivery_address") or {}
+    # customer phone como objeto
+    customer = order.get("customer", {})
+    phone = customer.get("phone", "")
+    if isinstance(phone, str):
+        customer["phone"] = {"number": phone}
+    elif isinstance(phone, dict):
+        customer["phone"] = phone
+    else:
+        customer["phone"] = {"number": str(phone)}
+
+    # camelCase nos campos de itens e opções
+    def fix_option(opt):
+        return {
+            "optionId": opt.get("option_id", opt.get("optionId")),
+            "externalCode": opt.get("external_code", opt.get("externalCode")),
+            "name": opt.get("name", ""),
+            "optionGroupId": opt.get("option_group_id", opt.get("optionGroupId")),
+            "optionGroupName": opt.get("option_group_name", opt.get("optionGroupName")),
+            "quantity": int(opt.get("quantity", 1)),
+            "unitPrice": float(opt.get("unit_price", opt.get("unitPrice", 0))),
+            "optionGroupTotalSelectedOptions": opt.get("option_group_total_selected_options", opt.get("optionGroupTotalSelectedOptions")),
+        }
+
+    def fix_item(item):
+        return {
+            "id": str(item.get("item_id", item.get("id", ""))),
+            "externalCode": item.get("external_code", item.get("externalCode")),
+            "name": item.get("name", ""),
+            "quantity": int(item.get("quantity", 1)),
+            "unitPrice": float(item.get("unit_price", item.get("unitPrice", 0))),
+            "totalPrice": float(item.get("total_price", item.get("totalPrice", 0))),
+            "observations": item.get("observation", item.get("observations", "")),
+            "options": [fix_option(opt) for opt in item.get("options", [])]
+        }
+
+    items = [fix_item(i) for i in order.get("items", [])]
+
+    # deliveryAddress seguro
+    delivery = order.get("delivery", {})
+    address = delivery.get("deliveryAddress") or order.get("delivery_address") or {}
+
+    delivery_fixed = {
+        "deliveredBy": delivery.get("deliveredBy", order.get("delivered_by", "")),
+        "deliveryDateTime": delivery.get("deliveryDateTime", order.get("created_at", datetime.utcnow().isoformat())),
+        "mode": delivery.get("mode", order.get("delivered_by", "")),
+        "pickupCode": delivery.get("pickupCode", None),
+        "deliveryAddress": {
+            "country": address.get("country", "Brasil"),
+            "state": address.get("state", ""),
+            "city": address.get("city", ""),
+            "postalCode": address.get("postalCode", address.get("postal_code", "")),
+            "streetName": address.get("streetName", address.get("street", "")),
+            "streetNumber": address.get("streetNumber", address.get("number", "")),
+            "neighborhood": address.get("neighborhood", ""),
+            "complement": address.get("complement", ""),
+            "reference": address.get("reference", "")
+        }
+    }
+
     return {
         "id": str(order.get("id")),
         "displayId": str(order.get("display_id", "")),
@@ -23,46 +78,15 @@ def transform_order_data(order):
         "salesChannel": order.get("sales_channel", "").upper(),
         "orderTiming": order.get("order_timing", "").upper(),
         "createdAt": order.get("created_at", datetime.utcnow().isoformat()),
-        "customer": order.get("customer", {}),
-        "delivery": {
-            "mode": order.get("delivered_by") or "EXPRESS",
-            "deliveredBy": order.get("delivered_by", ""),
-            "pickupCode": None,
-            "deliveryDateTime": order.get("created_at", datetime.utcnow().isoformat()),
-            "deliveryAddress": {
-                "country": "Brasil",
-                "state": address.get("state", ""),
-                "city": address.get("city", ""),
-                "postalCode": address.get("postal_code", ""),
-                "streetName": address.get("street", ""),
-                "streetNumber": address.get("number", ""),
-                "neighborhood": address.get("neighborhood", ""),
-                "complement": address.get("complement", ""),
-                "reference": address.get("reference", "")
-            }
-        },
-        "items": order.get("items", []),
+        "customer": customer,
+        "delivery": delivery_fixed,
+        "items": items,
         "merchant": {
             "id": str(order.get("merchant_id", "")),
             "name": "Seu Restaurante"
         },
-        "total": {
-            "subTotal": 0,
-            "deliveryFee": order.get("delivery_fee", 0),
-            "orderAmount": order.get("total", 0),
-            "benefits": 0,
-            "additionalFees": 0
-        },
-        "payments": {
-            "methods": [{
-                "method": payment.get("payment_method", ""),
-                "type": payment.get("payment_type", ""),
-                "value": payment.get("total", 0),
-                "currency": "BRL",
-            }],
-            "pending": 0,
-            "prepaid": payment.get("total", 0)
-        },
+        "total": order.get("total", {}),
+        "payments": order.get("payments", {})
     }
 
 def verify_token(request):
@@ -72,19 +96,15 @@ def verify_token(request):
         return True
     return False
 
-# --- Aceita ambos endpoints: compatível com o Consumer e o Cardápio ---
 @app.route('/webhook/orders', methods=['POST'])
 @app.route('/webhook/cardapioweb', methods=['POST'])
 def webhook_orders():
     event = request.get_json()
     print("DEBUG: Recebido no webhook:", event)
-
-    # Primeiro tenta 'id' (Make), se não, tenta 'order_id' (Cardápio Web)
     order_id = event.get("id") or event.get("order_id")
     if not order_id:
         return jsonify({"error": "Payload inesperado, sem id/order_id", "raw": event}), 400
-
-    # Se só tiver order_id, buscar detalhes completos na API CardápioWeb
+    # Buscar detalhes se vier só order_id (webhook Cardápio Web)
     if "order_id" in event and len(event.keys()) <= 6:
         url = f"{CARDAPIOWEB_BASE}/orders/{order_id}"
         headers = {"X-API-KEY": CARDAPIOWEB_TOKEN, "Content-Type": "application/json"}
@@ -96,7 +116,6 @@ def webhook_orders():
         order = resp.json()
     else:
         order = event
-
     pedido_transformado = transform_order_data(order)
     PEDIDOS_PENDENTES[str(order_id)] = pedido_transformado
     print(f"Pedido {order_id} capturado via webhook e armazenado.")
