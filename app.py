@@ -12,7 +12,7 @@ CONSUMER_API_TOKEN = 'pk_live_zT3r7Y!a9b#2DfLkW8QzM0XeP4nGpVt-7uC@HjLsEw9Rx1YvKm
 PEDIDOS_PENDENTES = {}
 
 def transform_order_data(order):
-    customer = order.get("customer", {})
+    customer = order.get("customer") or {}
     phone = customer.get("phone", "")
     if isinstance(phone, str):
         customer["phone"] = {"number": phone}
@@ -132,9 +132,9 @@ def polling():
         pedido["status"] = "NEW"
         pedido["fullCode"] = "PLACED"
         pedido["code"] = "PLC"
-    print(f"Polling: {len(pedidos)} pedidos pendentes [Orders]")
-    # Aqui retorna apenas "Orders" como chave
-    return jsonify({"Orders": pedidos})
+    print(f"Polling: {len(pedidos)} pedidos pendentes [Pedidos]")
+    # Aqui retorna apenas "Pedidos" como chave
+    return jsonify({"Pedidos": pedidos})
 
 @app.route('/api/parceiro/order/<order_id>', methods=['GET'])
 def get_order(order_id):
