@@ -132,9 +132,9 @@ def polling():
         pedido["status"] = "NEW"
         pedido["fullCode"] = "PLACED"
         pedido["code"] = "PLC"
-    print(f"Polling: {len(pedidos)} pedidos pendentes [orders]")
-    # Aqui retorna apenas "orders" como chave
-    return jsonify({"orders": pedidos})
+    print(f"Polling: {len(pedidos)} pedidos pendentes [Orders]")
+    # Aqui retorna apenas "Orders" como chave
+    return jsonify({"Orders": pedidos})
 
 @app.route('/api/parceiro/order/<order_id>', methods=['GET'])
 def get_order(order_id):
