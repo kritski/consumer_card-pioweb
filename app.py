@@ -128,8 +128,13 @@ def webhook_orders():
 def polling():
     if not verify_token(request): return abort(401)
     pedidos = list(PEDIDOS_PENDENTES.values())
-    print(f"Polling: {len(pedidos)} pedidos pendentes [raiz]")
-    return jsonify(pedidos)
+    for pedido in pedidos:
+        pedido["status"] = "NEW"
+        pedido["fullCode"] = "PLACED"
+        pedido["code"] = "PLC"
+    print(f"Polling: {len(pedidos)} pedidos pendentes [orders]")
+    # Aqui retorna apenas "orders" como chave
+    return jsonify({"orders": pedidos})
 
 @app.route('/api/parceiro/order/<order_id>', methods=['GET'])
 def get_order(order_id):
