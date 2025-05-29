@@ -12,6 +12,8 @@ from datetime import datetime, timezone, timedelta
 import logging
 from logging.handlers import RotatingFileHandler
 import traceback
+import threading
+import time
 
 # Configurar logging
 logging.basicConfig(
@@ -30,8 +32,10 @@ app = Flask(__name__)
 MAKE_WEBHOOK_URL = os.environ.get('MAKE_WEBHOOK_URL', 'https://hook.us2.make.com/t9b65xppmlcycvdtlpwx1wfzuo2i6qg6')
 API_TOKEN = os.environ.get('API_TOKEN', 'pk_live_zT3r7Y!a9b#2DfLkW8QzM0XeP4nGpVt-7uC@HjLsEw9Rx1YvKmZBdNcTfUqAy')
 
-# Armazenamento temporário de pedidos (em produção, use um banco de dados)
-orders_cache = {}
+# ARMAZENAMENTO TEMPORÁRIO (em memória) para pedidos pendentes
+PEDIDOS_PENDENTES = {}
+PEDIDOS_CACHE = {}  # Cache para detalhes completos dos pedidos
+PEDIDOS_LOCK = threading.Lock()  # Lock para acesso thread-safe
 
 # Função para validar o token de autenticação
 def verify_token_auth(auth_header):
@@ -530,6 +534,31 @@ def transform_to_consumer_format(cardapio_order):
     
     return consumer_format
 
+# Função para criar item de polling no formato do Consumer
+def create_polling_item(order_data):
+    """
+    Cria um item de polling no formato exato esperado pelo Consumer
+    """
+    order_id = str(order_data.get('id', ''))
+    display_id = str(order_data.get('displayId', order_data.get('display_id', '')))
+    created_at = order_data.get('createdAt', order_data.get('created_at', datetime.now(timezone.utc).isoformat()))
+    
+    # Formatar data no formato UTC ISO 8601
+    if not created_at.endswith('Z') and not '+' in created_at and not '-' in created_at[-6:]:
+        created_at = f"{created_at}Z"
+    
+    # Criar item de polling no formato exato esperado pelo Consumer
+    polling_item = {
+        "id": order_id,
+        "orderId": order_id,
+        "createdAt": created_at,
+        "fullCode": "PLACED",
+        "code": "PLC",
+        "statusCode": 0  # Importante: statusCode deve ser um número inteiro
+    }
+    
+    return polling_item
+
 # Rota de saúde para verificar se a API está funcionando
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -582,7 +611,16 @@ def receive_orders_from_make():
                 if consumer_data:
                     # Armazenar o pedido em cache para consultas futuras
                     order_id = consumer_data['id']
-                    orders_cache[order_id] = consumer_data
+                    
+                    # Armazenar o pedido em memória para polling
+                    with PEDIDOS_LOCK:
+                        PEDIDOS_CACHE[order_id] = consumer_data
+                        # Criar item de polling e armazenar em PEDIDOS_PENDENTES
+                        polling_item = create_polling_item(consumer_data)
+                        PEDIDOS_PENDENTES[order_id] = polling_item
+                    
+                    logger.info(f"Pedido {order_id} armazenado para polling")
+                    
                     results.append({
                         'id': order_id,
                         'status': 'success',
@@ -610,7 +648,15 @@ def receive_orders_from_make():
             
             # Armazenar o pedido em cache para consultas futuras
             order_id = consumer_data['id']
-            orders_cache[order_id] = consumer_data
+            
+            # Armazenar o pedido em memória para polling
+            with PEDIDOS_LOCK:
+                PEDIDOS_CACHE[order_id] = consumer_data
+                # Criar item de polling e armazenar em PEDIDOS_PENDENTES
+                polling_item = create_polling_item(consumer_data)
+                PEDIDOS_PENDENTES[order_id] = polling_item
+            
+            logger.info(f"Pedido {order_id} armazenado para polling")
             
             # Retornar os dados transformados
             logger.info(f"Pedido {order_id} processado com sucesso")
@@ -634,104 +680,91 @@ def polling():
     try:
         logger.info("Polling solicitado pelo Consumer")
         
-        # Preparar payload para o Make.com
-        payload = {
-            "action": "polling",
-            "timestamp": datetime.now().isoformat(),
-            "merchant_id": "14104"  # ID do merchant no CardápioWeb
-        }
+        # Verificar se temos pedidos pendentes em memória
+        with PEDIDOS_LOCK:
+            polling_items = list(PEDIDOS_PENDENTES.values())
         
-        logger.info(f"Enviando payload para Make.com: {payload}")
+        logger.info(f"Polling: {len(polling_items)} pedidos pendentes para integração")
         
-        # Chamar o webhook do Make.com para buscar pedidos
-        response = requests.post(
-            MAKE_WEBHOOK_URL,
-            json=payload,
-            headers={'Content-Type': 'application/json'}
-        )
-        
-        logger.info(f"Resposta do Make.com: Status {response.status_code}")
-        logger.info(f"Resposta do Make.com: Headers {dict(response.headers)}")
-        logger.info(f"Resposta do Make.com: Body {response.text}")
-        
-        if response.status_code != 200:
-            logger.error(f"Erro ao buscar pedidos no Make.com: {response.status_code}")
-            # Retornar objeto vazio em formato esperado pelo Consumer
-            return jsonify({
-                "items": [],
-                "statusCode": 0,
-                "reasonPhrase": None
-            })
-        
-        # Processar a resposta do Make.com
-        try:
-            make_data = response.json()
-            logger.info(f"Dados recebidos do Make.com: {make_data}")
-            
-            # Formatar os dados no formato esperado pelo Consumer
-            polling_items = []
-            
-            # Se make_data for um objeto com campo 'orders', usar esse campo
-            if isinstance(make_data, dict) and 'orders' in make_data:
-                orders_list = make_data.get('orders', [])
-            # Se make_data for um objeto com campo 'data', usar esse campo
-            elif isinstance(make_data, dict) and 'data' in make_data:
-                data_field = make_data.get('data', {})
-                # Se data_field for um objeto com campo 'items', usar esse campo
-                if isinstance(data_field, dict) and 'items' in data_field:
-                    orders_list = data_field.get('items', [])
-                else:
-                    orders_list = [data_field] if data_field else []
-            # Se make_data for um array, usar diretamente
-            elif isinstance(make_data, list):
-                orders_list = make_data
-            # Se make_data for um objeto sem campos especiais, converter para array
-            elif make_data:
-                orders_list = [make_data]
-            else:
-                orders_list = []
-            
-            # Processar cada pedido
-            for item in orders_list:
-                # Garantir que cada item tenha os campos obrigatórios
-                if isinstance(item, dict):
-                    order_id = str(item.get('id', str(uuid.uuid4())))
-                    display_id = str(item.get('display_id', item.get('displayId', '')))
-                    created_at = item.get('createdAt', item.get('created_at', datetime.now(timezone.utc).isoformat()))
+        # Se não temos pedidos pendentes em memória, tentar buscar do Make.com
+        if not polling_items:
+            try:
+                # Preparar payload para o Make.com
+                payload = {
+                    "action": "polling",
+                    "timestamp": datetime.now().isoformat(),
+                    "merchant_id": "14104"  # ID do merchant no CardápioWeb
+                }
+                
+                logger.info(f"Enviando payload para Make.com: {payload}")
+                
+                # Chamar o webhook do Make.com para buscar pedidos
+                response = requests.post(
+                    MAKE_WEBHOOK_URL,
+                    json=payload,
+                    headers={'Content-Type': 'application/json'}
+                )
+                
+                logger.info(f"Resposta do Make.com: Status {response.status_code}")
+                logger.info(f"Resposta do Make.com: Headers {dict(response.headers)}")
+                logger.info(f"Resposta do Make.com: Body {response.text}")
+                
+                if response.status_code == 200:
+                    # Processar a resposta do Make.com
+                    make_data = response.json()
+                    logger.info(f"Dados recebidos do Make.com: {make_data}")
                     
-                    # Formatar data no formato UTC ISO 8601
-                    if not created_at.endswith('Z') and not '+' in created_at and not '-' in created_at[-6:]:
-                        created_at = f"{created_at}Z"
+                    # Extrair pedidos da resposta do Make.com
+                    orders_list = []
                     
-                    # Criar item de polling no formato EXATO esperado pelo Consumer
-                    polling_item = {
-                        "id": order_id,
-                        "orderId": order_id,
-                        "createdAt": created_at,
-                        "fullCode": "PLACED",
-                        "code": "PLC",
-                        "statusCode": 0  # Importante: statusCode deve ser um número inteiro
-                    }
-                    polling_items.append(polling_item)
+                    # Se make_data for um objeto com campo 'orders', usar esse campo
+                    if isinstance(make_data, dict) and 'orders' in make_data:
+                        orders_list = make_data.get('orders', [])
+                    # Se make_data for um objeto com campo 'data', usar esse campo
+                    elif isinstance(make_data, dict) and 'data' in make_data:
+                        data_field = make_data.get('data', {})
+                        # Se data_field for um objeto com campo 'items', usar esse campo
+                        if isinstance(data_field, dict) and 'items' in data_field:
+                            orders_list = data_field.get('items', [])
+                        else:
+                            orders_list = [data_field] if data_field else []
+                    # Se make_data for um array, usar diretamente
+                    elif isinstance(make_data, list):
+                        orders_list = make_data
+                    # Se make_data for um objeto sem campos especiais, converter para array
+                    elif make_data:
+                        orders_list = [make_data]
+                    
+                    # Processar cada pedido
+                    for item in orders_list:
+                        if isinstance(item, dict):
+                            # Transformar os dados para o formato do Consumer
+                            consumer_data = transform_to_consumer_format(item)
+                            if consumer_data:
+                                order_id = consumer_data['id']
+                                
+                                # Armazenar o pedido em memória para polling
+                                with PEDIDOS_LOCK:
+                                    PEDIDOS_CACHE[order_id] = consumer_data
+                                    # Criar item de polling e armazenar em PEDIDOS_PENDENTES
+                                    polling_item = create_polling_item(consumer_data)
+                                    PEDIDOS_PENDENTES[order_id] = polling_item
+                                    polling_items.append(polling_item)
+                                
+                                logger.info(f"Pedido {order_id} do Make.com armazenado para polling")
             
-            logger.info(f"Retornando {len(polling_items)} itens para o Consumer")
-            
-            # Retornar objeto no formato exato esperado pelo Consumer
-            return jsonify({
-                "items": polling_items,
-                "statusCode": 0,
-                "reasonPhrase": None
-            })
+            except Exception as e:
+                logger.error(f"Erro ao buscar pedidos do Make.com: {str(e)}")
+                logger.error(traceback.format_exc())
         
-        except Exception as e:
-            logger.error(f"Erro ao processar resposta do Make.com: {str(e)}")
-            logger.error(traceback.format_exc())
-            # Retornar objeto vazio em formato esperado pelo Consumer
-            return jsonify({
-                "items": [],
-                "statusCode": 0,
-                "reasonPhrase": None
-            })
+        logger.info(f"Retornando {len(polling_items)} itens para o Consumer")
+        
+        # Retornar objeto no formato exato esperado pelo Consumer
+        return jsonify({
+            "items": polling_items,
+            "statusCode": 0,
+            "reasonPhrase": None
+        })
     
     except Exception as e:
         logger.error(f"Erro ao fazer polling: {str(e)}")
@@ -749,9 +782,10 @@ def get_order_details(order_id):
     logger.info(f"Detalhes solicitados para pedido: {order_id}")
     try:
         # Verificar se o pedido está em cache
-        if order_id in orders_cache:
-            logger.info(f"Pedido {order_id} encontrado em cache")
-            return jsonify(orders_cache[order_id])
+        with PEDIDOS_LOCK:
+            if order_id in PEDIDOS_CACHE:
+                logger.info(f"Pedido {order_id} encontrado em cache")
+                return jsonify(PEDIDOS_CACHE[order_id])
         
         # Se não estiver em cache, buscar no Make.com
         response = requests.post(
@@ -789,7 +823,8 @@ def get_order_details(order_id):
                 return jsonify({}), 404
             
             # Armazenar o pedido em cache para consultas futuras
-            orders_cache[order_id] = consumer_data
+            with PEDIDOS_LOCK:
+                PEDIDOS_CACHE[order_id] = consumer_data
             
             # Retornar os dados transformados
             logger.info(f"Detalhes do pedido {order_id} retornados com sucesso")
@@ -813,6 +848,12 @@ def update_order_status(order_id):
         # Obter os dados da requisição
         status_data = request.json
         logger.info(f"Dados de status recebidos: {status_data}")
+        
+        # Remover o pedido da lista de pendentes após integração
+        with PEDIDOS_LOCK:
+            if order_id in PEDIDOS_PENDENTES:
+                PEDIDOS_PENDENTES.pop(order_id)
+                logger.info(f"Pedido {order_id} removido da lista de pendentes após integração")
         
         # Chamar o webhook do Make.com para atualizar o status do pedido
         response = requests.post(
