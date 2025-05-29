@@ -132,9 +132,24 @@ def polling():
         pedido["status"] = "NEW"
         pedido["fullCode"] = "PLACED"
         pedido["code"] = "PLC"
-    print(f"Polling: {len(pedidos)} pedidos pendentes [Pedidos]")
-    # Aqui retorna apenas "Pedidos" como chave
-    return jsonify({"Pedidos": pedidos})
+    print(f"Polling: {len(pedidos)} pedidos pendentes [todos arrays simultâneos]")
+    return jsonify({
+        "orders": pedidos,
+        "Orders": pedidos,
+        "Pedidos": pedidos,
+        "items": pedidos,
+        "data": pedidos,
+        "result": pedidos,
+        "PedidosPendentes": pedidos,
+        "root": pedidos,
+        "PedidosFull": pedidos,
+        "PedidosJson": pedidos,
+        "ResultSet": pedidos,
+        "PedidosCardapioWeb": pedidos,
+        "PedidosIntegracao": pedidos,
+        # E se algum client consome o array raiz:
+        "rootArray": pedidos
+    })
 
 @app.route('/api/parceiro/order/<order_id>', methods=['GET'])
 def get_order(order_id):
