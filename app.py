@@ -1,46 +1,23 @@
 from flask import Flask, request, jsonify, abort
-import requests
 from datetime import datetime, timedelta
+import requests
 
 app = Flask(__name__)
 
-# ---- CONFIG ----
+# === CONFIGURAÇÕES ===
 CARDAPIOWEB_BASE = 'https://integracao.cardapioweb.com/api/partner/v1'
 CARDAPIOWEB_TOKEN = 'avsj9dEaxd5YdYBW1bYjEycETsp87owQYu6Eh2J5'
 CARDAPIOWEB_MERCHANT = '14104'
-
 CONSUMER_API_TOKEN = 'pk_live_zT3r7Y!a9b#2DfLkW8QzM0XeP4nGpVt-7uC@HjLsEw9Rx1YvKmZBdNcTfUqAy'
 
-PEDIDOS = {}  # Banco simples, substitua por Redis/SQLite para produção
+PEDIDOS = {}  # Em produção use Redis ou banco - cuidado para não perder pedidos.
 
-# ---- UTILS ----
-
-def get_cardapioweb_order(order_id):
-    """Busca detalhes de pedido pelo id diretamente no Cardápio Web"""
-    url = f'{CARDAPIOWEB_BASE}/orders/{order_id}'
-    headers = {'X-API-KEY': CARDAPIOWEB_TOKEN, 'Content-Type': 'application/json'}
-    params = {'merchant_id': CARDAPIOWEB_MERCHANT}
-    resp = requests.get(url, headers=headers, params=params)
-    if resp.status_code == 200:
-        return resp.json()
-    else:
-        return None
-
-def update_cardapioweb_status(order_id, new_status):
-    """Atualiza status do pedido via API CardápioWeb"""
-    url = f'{CARDAPIOWEB_BASE}/orders/{order_id}/status'
-    headers = {'X-API-KEY': CARDAPIOWEB_TOKEN, 'Content-Type': 'application/json'}
-    data = {'status': new_status}
-    resp = requests.post(url, headers=headers, json=data)
-    return resp.status_code in (200, 204)
+# === FUNÇÕES AUXILIARES ===
 
 def transform_order_data(order):
-    """Transforma cardapioweb para padrão Consumer"""
-    # Adapte caso altere campos na especificação futura
-    pedido_id = str(order["id"])
     payment = order["payments"][0] if order.get("payments") else {"payment_method":"", "payment_type":"", "total":0}
     return {
-        "id": pedido_id,
+        "id": str(order["id"]),
         "displayId": str(order.get("display_id", "")),
         "orderType": order.get("order_type", "").upper(),
         "salesChannel": order.get("sales_channel", "").upper(),
@@ -110,54 +87,53 @@ def transform_order_data(order):
     }
 
 def verify_consumer_token(request):
-    """Verifica se header Xapikey OU Authorization é o da config"""
     token1 = request.headers.get("Xapikey")
     token2 = request.headers.get("Authorization")
     if token1 == CONSUMER_API_TOKEN or (token2 and token2.split()[-1] == CONSUMER_API_TOKEN):
         return True
     return False
 
-# ---- ENDPOINTS PARA O CARCAPIO WEB CHAMAR VIA WEBHOOK ----
+def update_cardapioweb_status(order_id, status):
+    url = f"{CARDAPIOWEB_BASE}/orders/{order_id}/status"
+    headers = {'X-API-KEY': CARDAPIOWEB_TOKEN, 'Content-Type': 'application/json'}
+    data = {'status': status}
+    resp = requests.post(url, headers=headers, json=data)
+    return resp.status_code in (200, 204)
+
+# === ROTA PARA RECEBER PEDIDO NOVO DO CARDAPIO WEB ===
 @app.route('/webhook/cardapioweb', methods=['POST'])
 def webhook_novo_pedido():
-    """Ponto de entrada do webhook do Cardápio Web para pedido novo/atualização"""
     order = request.json
     PEDIDOS[str(order["id"])] = transform_order_data(order)
     print(f"[Webhook] Pedido {order['id']} recebido/atualizado via webhook.")
     return jsonify({"status": "recebido"})
 
-# ---- ENDPOINTS CHAMADOS PELO CONSUMER ----
+# === ENDPOINTS DE INTEGRAÇÃO PARA O CONSUMER ===
 
 @app.route('/api/parceiro/polling', methods=['GET'])
 def api_polling():
     if not verify_consumer_token(request): return abort(401)
-    # Retorna todos pedidos armazenados
-    ordem = list(PEDIDOS.values())
-    print(f"[Polling] {len(ordem)} pedidos para Consumer.")
-    return jsonify({"orders": ordem})
+    return jsonify({"orders": list(PEDIDOS.values())})
 
 @app.route('/api/parceiro/order/<order_id>', methods=['GET'])
 def api_order_details(order_id):
     if not verify_consumer_token(request): return abort(401)
     pedido = PEDIDOS.get(order_id)
     if not pedido:
-        # Busca na Cardapioweb (opcional, pode comentar caso não queira fallback)
-        raw = get_cardapioweb_order(order_id)
-        if not raw: return abort(404)
-        pedido = transform_order_data(raw)
-        PEDIDOS[order_id] = pedido
+        return abort(404)
     return jsonify(pedido)
 
 @app.route('/api/parceiro/order/<order_id>', methods=['POST'])
 def api_update_status(order_id):
     if not verify_consumer_token(request): return abort(401)
     data = request.json
-    new_status = data.get("status") or data.get("action") or None
+    new_status = data.get("status") or data.get("action")
     if not new_status:
         return abort(400)
-    # Atualiza “no seu banco” (opcional)
     if order_id in PEDIDOS:
         PEDIDOS[order_id]['status'] = new_status
-    # Atualiza no Cardápio Web
     ok = update_cardapioweb_status(order_id, new_status)
-    print(f"Status de {order_id}: {new_status} enviado para Cardápio Web:
+    return jsonify({"status": "CardapioWeb atualizado" if ok else "Erro CardapioWeb"})
+
+if __name__ == "__main__":
+    app.run()
