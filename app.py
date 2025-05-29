@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Configuração
-MAKE_WEBHOOK_URL = os.environ.get('MAKE_WEBHOOK_URL', 'https://hook.eu2.make.com/YOUR_WEBHOOK_ID' )
+MAKE_WEBHOOK_URL = os.environ.get('MAKE_WEBHOOK_URL', 'https://hook.us2.make.com/t9b65xppmlcycvdtlpwx1wfzuo2i6qg6' )
 API_TOKEN = os.environ.get('API_TOKEN', 'pk_live_zT3r7Y!a9b#2DfLkW8QzM0XeP4nGpVt-7uC@HjLsEw9Rx1YvKmZBdNcTfUqAy')
 
 # Armazenamento temporário de pedidos (em produção, use um banco de dados)
@@ -40,7 +40,9 @@ def log_request_info():
         logger.info(f"Recebendo requisição para: {request.path}")
         logger.info(f"Headers: {dict(request.headers)}")
         auth_header = request.headers.get('Authorization')
+        xapi_header = request.headers.get('Xapikey')
         logger.info(f"Auth header: {auth_header}")
+        logger.info(f"Xapikey header: {xapi_header}")
 
 # Função para validar o token de autenticação
 def verify_token_auth(auth_header):
@@ -78,7 +80,14 @@ def verify_token():
     if request.path == '/health':
         return
     
+    # Verificar token no cabeçalho Authorization
     auth_header = request.headers.get('Authorization')
+    
+    # Se não encontrar no Authorization, verificar no Xapikey
+    if not auth_header:
+        auth_header = request.headers.get('Xapikey')
+        logger.info(f"Token encontrado em Xapikey: {auth_header}")
+    
     is_valid, message = verify_token_auth(auth_header)
     
     if not is_valid:
