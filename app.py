@@ -656,67 +656,89 @@ def polling():
         
         if response.status_code != 200:
             logger.error(f"Erro ao buscar pedidos no Make.com: {response.status_code}")
-            # Retornar array vazio em vez de erro para o Consumer
-            return jsonify([])
+            # Retornar objeto vazio em formato esperado pelo Consumer
+            return jsonify({
+                "items": [],
+                "statusCode": 0,
+                "reasonPhrase": None
+            })
         
         # Processar a resposta do Make.com
         try:
             make_data = response.json()
             logger.info(f"Dados recebidos do Make.com: {make_data}")
             
-            # Verificar se os dados estão no formato esperado pelo Consumer
-            # O Consumer espera um array de objetos, mesmo que vazio
-            if not isinstance(make_data, list):
-                logger.warning("Dados do Make.com não estão em formato de array, convertendo...")
-                
-                # Se make_data for um objeto com campo 'orders', usar esse campo
-                if isinstance(make_data, dict) and 'orders' in make_data:
-                    make_data = make_data.get('orders', [])
-                # Se make_data for um objeto com campo 'data', usar esse campo
-                elif isinstance(make_data, dict) and 'data' in make_data:
-                    data_field = make_data.get('data', {})
-                    # Se data_field for um objeto com campo 'items', usar esse campo
-                    if isinstance(data_field, dict) and 'items' in data_field:
-                        make_data = data_field.get('items', [])
-                    else:
-                        make_data = [data_field] if data_field else []
-                # Se make_data for um objeto sem campos especiais, converter para array
-                elif make_data:
-                    make_data = [make_data]
-                else:
-                    make_data = []
-            
             # Formatar os dados no formato esperado pelo Consumer
             polling_items = []
-            for item in make_data:
+            
+            # Se make_data for um objeto com campo 'orders', usar esse campo
+            if isinstance(make_data, dict) and 'orders' in make_data:
+                orders_list = make_data.get('orders', [])
+            # Se make_data for um objeto com campo 'data', usar esse campo
+            elif isinstance(make_data, dict) and 'data' in make_data:
+                data_field = make_data.get('data', {})
+                # Se data_field for um objeto com campo 'items', usar esse campo
+                if isinstance(data_field, dict) and 'items' in data_field:
+                    orders_list = data_field.get('items', [])
+                else:
+                    orders_list = [data_field] if data_field else []
+            # Se make_data for um array, usar diretamente
+            elif isinstance(make_data, list):
+                orders_list = make_data
+            # Se make_data for um objeto sem campos especiais, converter para array
+            elif make_data:
+                orders_list = [make_data]
+            else:
+                orders_list = []
+            
+            # Processar cada pedido
+            for item in orders_list:
                 # Garantir que cada item tenha os campos obrigatórios
                 if isinstance(item, dict):
                     order_id = str(item.get('id', str(uuid.uuid4())))
+                    created_at = item.get('createdAt', item.get('created_at', datetime.now(timezone.utc).isoformat()))
+                    
+                    # Formatar data no formato UTC ISO 8601
+                    if not created_at.endswith('Z') and not '+' in created_at and not '-' in created_at[-6:]:
+                        created_at = f"{created_at}Z"
+                    
                     polling_item = {
                         "id": order_id,
                         "orderId": order_id,
-                        "createdAt": item.get('createdAt', item.get('created_at', datetime.now().isoformat())),
+                        "createdAt": created_at,
                         "fullCode": "PLACED",
-                        "code": "PLC",
-                        "statusCode": 0
+                        "code": "PLC"
                     }
                     polling_items.append(polling_item)
             
             logger.info(f"Retornando {len(polling_items)} itens para o Consumer")
-            # Retornar array de itens diretamente, sem encapsular em objeto
-            return jsonify(polling_items)
+            
+            # Retornar objeto no formato exato esperado pelo Consumer
+            return jsonify({
+                "items": polling_items,
+                "statusCode": 0,
+                "reasonPhrase": None
+            })
         
         except Exception as e:
             logger.error(f"Erro ao processar resposta do Make.com: {str(e)}")
             logger.error(traceback.format_exc())
-            # Retornar array vazio em vez de erro para o Consumer
-            return jsonify([])
+            # Retornar objeto vazio em formato esperado pelo Consumer
+            return jsonify({
+                "items": [],
+                "statusCode": 0,
+                "reasonPhrase": None
+            })
     
     except Exception as e:
         logger.error(f"Erro ao fazer polling: {str(e)}")
         logger.error(traceback.format_exc())
-        # Retornar array vazio em vez de erro para o Consumer
-        return jsonify([])
+        # Retornar objeto vazio em formato esperado pelo Consumer
+        return jsonify({
+            "items": [],
+            "statusCode": 0,
+            "reasonPhrase": None
+        })
 
 # Endpoint de detalhes do pedido - Consumer busca detalhes de um pedido específico
 @app.route('/api/parceiro/order/<order_id>', methods=['GET'])
