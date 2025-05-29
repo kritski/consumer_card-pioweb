@@ -68,7 +68,7 @@ def transform_order_data(order):
         }
     }
 
-    return {
+    base = {
         "id": str(order.get("id")),
         "displayId": str(order.get("display_id", "")),
         "orderType": order.get("order_type", "").upper(),
@@ -85,6 +85,11 @@ def transform_order_data(order):
         "total": order.get("total", {}),
         "payments": order.get("payments", {})
     }
+    # PATCH: coloca status/flags amigáveis para o Consumer
+    base["status"] = "NEW"
+    base["fullCode"] = "PLACED"
+    base["code"] = "PLC"
+    return base
 
 def verify_token(request):
     token1 = request.headers.get("Xapikey")
@@ -118,35 +123,12 @@ def webhook_orders():
     print(f"Pedido {order_id} capturado via webhook e armazenado.")
     return jsonify({"success": True})
 
+# VERSÃO 1 DO POLLING: APENAS ARRAY RAIZ
 @app.route('/api/parceiro/polling', methods=['GET'])
 def polling():
     if not verify_token(request): return abort(401)
     pedidos = list(PEDIDOS_PENDENTES.values())
-    print(f"Polling: {len(pedidos)} pedidos pendentes para integração.")
-    # Testa TODOS os formatos conhecidos
-    return jsonify({
-        "orders": pedidos,
-        "items": pedidos,
-        "data": pedidos,
-        "result": pedidos,
-        "Pedidos": pedidos,
-        "Orders": pedidos,
-        "PedidosPendentes": pedidos,
-        "root": pedidos,
-        "rootArray": pedidos,
-        "PedidosJson": pedidos,
-        "ResultSet": pedidos,
-        "PedidosIntegracao": pedidos,
-        "PedidosCardapioWeb": pedidos,
-        "PedidosFull": pedidos
-    })
-
-@app.route('/api/parceiro/polling_raw', methods=['GET'])
-def polling_raw():
-    if not verify_token(request): return abort(401)
-    pedidos = list(PEDIDOS_PENDENTES.values())
-    print(f"Polling [RAW]: {len(pedidos)} pedidos (array raiz).")
-    # Só o array puro (alguns clients antigos)
+    print(f"Polling: {len(pedidos)} pedidos pendentes [raiz]")
     return jsonify(pedidos)
 
 @app.route('/api/parceiro/order/<order_id>', methods=['GET'])
