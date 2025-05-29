@@ -129,6 +129,7 @@ def webhook_novo_pedido():
 @app.route('/api/parceiro/polling', methods=['GET'])
 def api_polling():
     if not verify_consumer_token(request): return abort(401)
+    print("[DEBUG] Pedidos no polling:", list(PEDIDOS.keys()))
     return jsonify({"orders": list(PEDIDOS.values())})
 
 @app.route('/api/parceiro/order/<order_id>', methods=['GET'])
