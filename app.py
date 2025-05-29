@@ -10,12 +10,10 @@ CARDAPIOWEB_TOKEN = 'avsj9dEaxd5YdYBW1bYjEycETsp87owQYu6Eh2J5'
 CARDAPIOWEB_MERCHANT = '14104'
 CONSUMER_API_TOKEN = 'pk_live_zT3r7Y!a9b#2DfLkW8QzM0XeP4nGpVt-7uC@HjLsEw9Rx1YvKmZBdNcTfUqAy'
 
-PEDIDOS = {}  # Em produção use Redis ou banco - cuidado para não perder pedidos.
-
-# === FUNÇÕES AUXILIARES ===
+PEDIDOS = {}  # Em produção use Redis ou banco
 
 def transform_order_data(order):
-    payment = order["payments"][0] if order.get("payments") else {"payment_method":"", "payment_type":"", "total":0}
+    payment = order["payments"][0] if order.get("payments") else {"payment_method": "", "payment_type":"", "total":0}
     return {
         "id": str(order["id"]),
         "displayId": str(order.get("display_id", "")),
@@ -103,7 +101,13 @@ def update_cardapioweb_status(order_id, status):
 # === ROTA PARA RECEBER PEDIDO NOVO DO CARDAPIO WEB ===
 @app.route('/webhook/cardapioweb', methods=['POST'])
 def webhook_novo_pedido():
-    order = request.json
+    raw = request.json
+    print("DEBUG: Recebido no webhook:", raw)
+    # Tenta encontrar o pedido real dentro do payload (estructuras possíveis)
+    order = raw.get("order") or raw.get("data") or raw
+    if not order or not order.get("id"):
+        print("Erro: payload inesperado ou sem 'id'.")
+        return jsonify({"error": "Payload inesperado ou sem id", "debug": raw}), 400
     PEDIDOS[str(order["id"])] = transform_order_data(order)
     print(f"[Webhook] Pedido {order['id']} recebido/atualizado via webhook.")
     return jsonify({"status": "recebido"})
@@ -120,6 +124,7 @@ def api_order_details(order_id):
     if not verify_consumer_token(request): return abort(401)
     pedido = PEDIDOS.get(order_id)
     if not pedido:
+        print(f"Tentativa de buscar pedido {order_id} não encontrado.")
         return abort(404)
     return jsonify(pedido)
 
