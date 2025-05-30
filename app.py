@@ -138,8 +138,13 @@ def polling():
     })
 
 # Ajuste crítico: aceita barras extras e normaliza o orderId
+from flask import redirect
+
 @app.route('/api/parceiro/order/<path:anyid>', methods=['GET', 'POST'], strict_slashes=False)
 def orderid_literal_fallback(anyid):
+    # Se houver barra dupla inicial, faz redirect para a rota canônica (1 barra)
+    if anyid.startswith('/'):
+        return redirect(f"/api/parceiro/order/{anyid.lstrip('/')}", code=301)
     anyid_norm = anyid.lstrip('/')
     pedido = PEDIDOS_PENDENTES.get(anyid_norm)
     if pedido:
