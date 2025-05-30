@@ -9,7 +9,6 @@ CARDAPIOWEB_TOKEN = 'avsj9dEaxd5YdYBW1bYjEycETsp87owQYu6Eh2J5'
 CARDAPIOWEB_MERCHANT = '14104'
 CONSUMER_API_TOKEN = 'pk_live_zT3r7Y!a9b#2DfLkW8QzM0XeP4nGpVt-7uC@HjLsEw9Rx1YvKmZBdNcTfUqAy'
 
-# id -> pedido
 PEDIDOS_PENDENTES = {}
 
 def agora():
@@ -69,8 +68,10 @@ def transform_order_data(order):
             "reference": address.get("reference", "")
         }
     }
+    order_id = str(order.get("id"))
     base = {
-        "id": str(order.get("id")),
+        "orderId": order_id,              # campo essencial para o Consumer!
+        "id": order_id,                   # opcional, para compatibilidade
         "displayId": str(order.get("display_id", "")),
         "orderType": order.get("order_type", "").upper(),
         "salesChannel": order.get("sales_channel", "").upper(),
@@ -124,41 +125,30 @@ def webhook_orders():
 
 @app.route('/api/parceiro/polling', methods=['GET'])
 def polling():
-    if not verify_token(request): return abort(401)
+    if not verify_token(request):
+        return abort(401)
     pedidos = list(PEDIDOS_PENDENTES.values())
     for pedido in pedidos:
         pedido["status"] = "NEW"
         pedido["fullCode"] = "PLACED"
         pedido["code"] = "PLC"
-    print(f"Polling: {len(pedidos)} pedidos pendentes [todos arrays simultâneos]")
+    print(f"Polling: {len(pedidos)} pedidos pendentes")
+    # RESPONDE SOMENTE COM "items", para compatibilidade máxima com Consumer!
     return jsonify({
-        "orders": pedidos,
-        "Orders": pedidos,
-        "Pedidos": pedidos,
-        "items": pedidos,
-        "data": pedidos,
-        "result": pedidos,
-        "PedidosPendentes": pedidos,
-        "root": pedidos,
-        "PedidosFull": pedidos,
-        "PedidosJson": pedidos,
-        "ResultSet": pedidos,
-        "PedidosCardapioWeb": pedidos,
-        "PedidosIntegracao": pedidos,
-        "rootArray": pedidos
+        "items": pedidos
     })
 
 @app.route('/api/parceiro/order/<anyid>', methods=['GET', 'POST'])
 def orderid_literal_fallback(anyid):
-    ids = list(PEDIDOS_PENDENTES.keys())
-    print(f"[BYPASS] Handler /order/<anyid> chamado ({anyid}). Pedidos na fila: {ids}")
-    if ids:
-        pedido = PEDIDOS_PENDENTES[ids[-1]]
+    # Busca por ID exata
+    pedido = PEDIDOS_PENDENTES.get(anyid)
+    if pedido:
         if request.method == 'POST':
-            PEDIDOS_PENDENTES.pop(ids[-1])
-            print(f"[BYPASS] Pedido removido após POST (integrado): {ids[-1]}")
+            PEDIDOS_PENDENTES.pop(anyid)
+            print(f"Pedido {anyid} removido após POST (integrado)")
         return jsonify(pedido)
-    return jsonify({"error": "Nenhum pedido na fila (handler literal)."}), 404
+    print(f"Pedido {anyid} não encontrado no dicionário PEDIDOS_PENDENTES.")
+    return jsonify({"error": "Pedido não encontrado."}), 404
 
 if __name__ == '__main__':
     app.run()
