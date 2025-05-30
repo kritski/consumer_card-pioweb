@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, abort
+from flask import Flask, request, jsonify, abort, redirect
 from datetime import datetime
 import requests
 
@@ -137,13 +137,14 @@ def polling():
         "items": pedidos
     })
 
-# Ajuste crítico: aceita barras extras e normaliza o orderId
-from flask import redirect
+# --------- DEBUG PRINTS ESPECIAL ---------
 
 @app.route('/api/parceiro/order/<path:anyid>', methods=['GET', 'POST'], strict_slashes=False)
 def orderid_literal_fallback(anyid):
+    print(f"O Flask recebeu na barra simples (ou barra normalizada): '{anyid}'")
     # Se houver barra dupla inicial, faz redirect para a rota canônica (1 barra)
     if anyid.startswith('/'):
+        print("[DEBUG] Barra dupla no início 'anyid', tentando redirecionar para canonical")
         return redirect(f"/api/parceiro/order/{anyid.lstrip('/')}", code=301)
     anyid_norm = anyid.lstrip('/')
     pedido = PEDIDOS_PENDENTES.get(anyid_norm)
@@ -154,3 +155,16 @@ def orderid_literal_fallback(anyid):
         return jsonify(pedido)
     print(f"Pedido {anyid_norm} não encontrado no dicionário PEDIDOS_PENDENTES.")
     return jsonify({"error": "Pedido não encontrado."}), 404
+
+@app.route('/api/parceiro/order//<anyid>', methods=['GET', 'POST'], strict_slashes=False)
+def orderid_fallback_double_bar(anyid):
+    print(f"O Flask recebeu na rota ESPECIAL DE BARRA DUPLA: '{anyid}'")
+    anyid_norm = anyid.lstrip('/')
+    pedido = PEDIDOS_PENDENTES.get(anyid_norm)
+    if pedido:
+        if request.method == 'POST':
+            PEDIDOS_PENDENTES.pop(anyid_norm)
+            print(f"Pedido {anyid_norm} removido após POST (integrado)")
+        return jsonify(pedido)
+    print(f"Pedido {anyid_norm} não encontrado na barra dupla.")
+    return jsonify({"error": "Pedido não encontrado (barra dupla)."}), 404
