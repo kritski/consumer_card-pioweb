@@ -133,21 +133,21 @@ def polling():
         pedido["fullCode"] = "PLACED"
         pedido["code"] = "PLC"
     print(f"Polling: {len(pedidos)} pedidos pendentes")
-    # RESPONDE SOMENTE COM "items", para compatibilidade máxima com Consumer!
     return jsonify({
         "items": pedidos
     })
 
-@app.route('/api/parceiro/order/<anyid>', methods=['GET', 'POST'])
+# Ajuste crítico: aceita barras extras e normaliza o orderId
+@app.route('/api/parceiro/order/<path:anyid>', methods=['GET', 'POST'])
 def orderid_literal_fallback(anyid):
-    # Busca por ID exata
-    pedido = PEDIDOS_PENDENTES.get(anyid)
+    anyid_norm = anyid.lstrip('/')   # remove possível barra a esquerda, ex: "/106744530" -> "106744530"
+    pedido = PEDIDOS_PENDENTES.get(anyid_norm)
     if pedido:
         if request.method == 'POST':
-            PEDIDOS_PENDENTES.pop(anyid)
-            print(f"Pedido {anyid} removido após POST (integrado)")
+            PEDIDOS_PENDENTES.pop(anyid_norm)
+            print(f"Pedido {anyid_norm} removido após POST (integrado)")
         return jsonify(pedido)
-    print(f"Pedido {anyid} não encontrado no dicionário PEDIDOS_PENDENTES.")
+    print(f"Pedido {anyid_norm} não encontrado no dicionário PEDIDOS_PENDENTES.")
     return jsonify({"error": "Pedido não encontrado."}), 404
 
 if __name__ == '__main__':
