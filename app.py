@@ -138,9 +138,9 @@ def polling():
     })
 
 # Ajuste crítico: aceita barras extras e normaliza o orderId
-@app.route('/api/parceiro/order/<path:anyid>', methods=['GET', 'POST'])
+@app.route('/api/parceiro/order/<path:anyid>', methods=['GET', 'POST'], strict_slashes=False)
 def orderid_literal_fallback(anyid):
-    anyid_norm = anyid.lstrip('/')   # remove possível barra a esquerda, ex: "/106744530" -> "106744530"
+    anyid_norm = anyid.lstrip('/')
     pedido = PEDIDOS_PENDENTES.get(anyid_norm)
     if pedido:
         if request.method == 'POST':
@@ -149,6 +149,3 @@ def orderid_literal_fallback(anyid):
         return jsonify(pedido)
     print(f"Pedido {anyid_norm} não encontrado no dicionário PEDIDOS_PENDENTES.")
     return jsonify({"error": "Pedido não encontrado."}), 404
-
-if __name__ == '__main__':
-    app.run()
