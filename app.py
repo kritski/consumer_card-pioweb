@@ -14,6 +14,14 @@ PEDIDOS_PENDENTES = {}
 def agora():
     return datetime.utcnow().isoformat()
 
+def remove_nulls(obj):
+    if isinstance(obj, dict):
+        return {k: remove_nulls(v) for k, v in obj.items() if v is not None}
+    elif isinstance(obj, list):
+        return [remove_nulls(i) for i in obj]
+    else:
+        return obj
+
 def transform_order_data(order):
     customer = order.get("customer") or {}
     phone = customer.get("phone", "")
@@ -84,8 +92,8 @@ def transform_order_data(order):
             "id": str(order.get("merchant_id", "")),
             "name": "Seu Restaurante"
         },
-        "total": order.get("total", {}),
-        "payments": order.get("payments", {}),
+        "total": order.get("total", 0.0),
+        "payments": order.get("payments", []),
         "status": "NEW",
         "fullCode": "PLACED",
         "code": "PLC"
@@ -93,7 +101,7 @@ def transform_order_data(order):
     return base
 
 def verify_token(request):
-    token1 = request.headers.get("Xapikey")
+    token1 = request.headers.get("XApiKey")
     token2 = request.headers.get("Authorization")
     if token1 == CONSUMER_API_TOKEN or (token2 and token2.split()[-1] == CONSUMER_API_TOKEN):
         return True
@@ -127,7 +135,7 @@ def webhook_orders():
 def polling():
     if not verify_token(request):
         return abort(401)
-    pedidos = list(PEDIDOS_PENDENTES.values())
+    pedidos = [remove_nulls(p) for p in PEDIDOS_PENDENTES.values()]
     for pedido in pedidos:
         pedido["status"] = "NEW"
         pedido["fullCode"] = "PLACED"
@@ -137,34 +145,28 @@ def polling():
         "items": pedidos
     })
 
-# --------- DEBUG PRINTS ESPECIAL ---------
-
 @app.route('/api/parceiro/order/<path:anyid>', methods=['GET', 'POST'], strict_slashes=False)
 def orderid_literal_fallback(anyid):
-    print(f"O Flask recebeu na barra simples (ou barra normalizada): '{anyid}'")
-    # Se houver barra dupla inicial, faz redirect para a rota canônica (1 barra)
-    if anyid.startswith('/'):
-        print("[DEBUG] Barra dupla no início 'anyid', tentando redirecionar para canonical")
-        return redirect(f"/api/parceiro/order/{anyid.lstrip('/')}", code=301)
     anyid_norm = anyid.lstrip('/')
     pedido = PEDIDOS_PENDENTES.get(anyid_norm)
     if pedido:
+        pedido_clean = remove_nulls(pedido)
         if request.method == 'POST':
             PEDIDOS_PENDENTES.pop(anyid_norm)
             print(f"Pedido {anyid_norm} removido após POST (integrado)")
-        return jsonify(pedido)
+        return jsonify(pedido_clean)
     print(f"Pedido {anyid_norm} não encontrado no dicionário PEDIDOS_PENDENTES.")
     return jsonify({"error": "Pedido não encontrado."}), 404
 
 @app.route('/api/parceiro/order//<anyid>', methods=['GET', 'POST'], strict_slashes=False)
 def orderid_fallback_double_bar(anyid):
-    print(f"O Flask recebeu na rota ESPECIAL DE BARRA DUPLA: '{anyid}'")
     anyid_norm = anyid.lstrip('/')
     pedido = PEDIDOS_PENDENTES.get(anyid_norm)
     if pedido:
+        pedido_clean = remove_nulls(pedido)
         if request.method == 'POST':
             PEDIDOS_PENDENTES.pop(anyid_norm)
             print(f"Pedido {anyid_norm} removido após POST (integrado)")
-        return jsonify(pedido)
+        return jsonify(pedido_clean)
     print(f"Pedido {anyid_norm} não encontrado na barra dupla.")
     return jsonify({"error": "Pedido não encontrado (barra dupla)."}), 404
