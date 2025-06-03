@@ -5,7 +5,7 @@ import re
 import json
 from urllib.parse import urlunparse, urlparse
 app = Flask(name)
------------ CONFIGURAÇÃO ANTI-GZIP -----------
+# ----------- CONFIGURAÇÃO ANTI-GZIP -----------
 class NoGzipRequest(Request):
     @property
     def accept_encodings(self):
@@ -155,7 +155,7 @@ base = {
 
 return remove_nulls(base)
 
------------ ROTAS -----------
+# ----------- ROTAS -----------
 @app.route('/', methods=['GET'])
 def healthcheck():
     return jsonify({
