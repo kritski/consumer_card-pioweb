@@ -148,7 +148,6 @@ def webhook_orders():
     pedido_transformado = transform_order_data(order)
     PEDIDOS_PENDENTES[str(order_id)] = pedido_transformado
     print(f"[ARMAZENADO] Pedido {order_id} armazenado em PEDIDOS_PENDENTES - Chaves atuais: {list(PEDIDOS_PENDENTES.keys())}")
-
     return jsonify({"success": True})
 
 @app.route('/api/parceiro/polling', methods=['GET'])
@@ -169,4 +168,13 @@ def polling():
     return jsonify({
         "items": pedidos,
         "statusCode": 0,
-        "reasonPhrase":
+        "reasonPhrase": None
+    })
+
+@app.route('/api/parceiro/order/<path:anyid>', methods=['GET', 'POST'], strict_slashes=False)
+def orderid_literal_fallback(anyid):
+    anyid_norm = anyid.lstrip('/')
+    print(f"[PEDIDO] Procurando ID: {anyid_norm} em {list(PEDIDOS_PENDENTES.keys())}")
+    pedido = PEDIDOS_PENDENTES.get(anyid_norm)
+    if pedido:
+        pedido_clean = remove_nulls
