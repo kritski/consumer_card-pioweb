@@ -177,4 +177,10 @@ def orderid_literal_fallback(anyid):
     print(f"[PEDIDO] Procurando ID: {anyid_norm} em {list(PEDIDOS_PENDENTES.keys())}")
     pedido = PEDIDOS_PENDENTES.get(anyid_norm)
     if pedido:
-        pedido_clean = remove_nulls
+        pedido_clean = remove_nulls(pedido)
+        if request.method == 'POST':
+            PEDIDOS_PENDENTES.pop(anyid_norm)
+            print(f"[PEDIDO] Pedido {anyid_norm} removido após POST (integrado)")
+        return jsonify(pedido_clean)
+    print(f"[PEDIDO] Pedido {anyid_norm} não encontrado!")
+    return jsonify({"error": "Pedido não encontrado."}), 404  # <-- Retorno adicionado!
