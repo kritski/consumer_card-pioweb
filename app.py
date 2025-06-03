@@ -19,7 +19,7 @@ def after_request_handler(response):
         response.headers['Content-Type'] = 'application/json; charset=utf-8'
 
     response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Api-Key')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Api-Key') # Informa que aceita X-Api-Key
     response.headers.add('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
     return response
 
@@ -36,7 +36,6 @@ def canonicalize_url_redirect():
 CARDAPIOWEB_BASE_URL = 'https://integracao.cardapioweb.com/api/partner/v1'
 CARDAPIOWEB_API_KEY = 'avsj9dEaxd5YdYBW1bYjEycETsp87owQYu6Eh2J5'
 CARDAPIOWEB_MERCHANT_ID = '14104'
-# CORRIGIDO para pk_live_ conforme print da configuração do Consumer
 CONSUMER_API_TOKEN = 'pk_live_zT3r7Y!a9b#2DfLkW8QzM0XeP4nGpVt-7uC@HjLsEw9Rx1YvKmZBdNcTfUqAy'
 
 PEDIDOS_PENDENTES = {}
@@ -57,24 +56,35 @@ def remove_null_values(obj_data):
     return _remove_null_values_recursive(obj_data)
 
 def verify_token(current_request):
-    token_xapi = current_request.headers.get("X-Api-Key") 
+    # Verifica ambas as variações do header do token
+    token_x_api_key = current_request.headers.get("X-Api-Key") # Padrão com hífen
+    token_xapikey_variant = current_request.headers.get("XApiKey")   # Variação sem hífen
+
     token_auth_header = current_request.headers.get("Authorization")
     log_timestamp = agora_iso()
 
-    if token_xapi and token_xapi == CONSUMER_API_TOKEN:
+    # Tenta validar com X-Api-Key
+    if token_x_api_key and token_x_api_key == CONSUMER_API_TOKEN:
+        # print(f"[{log_timestamp}] [AUTH_SUCCESS] Token via X-Api-Key validado.")
+        return True
+    
+    # Tenta validar com XApiKey (sem hífen)
+    if token_xapikey_variant and token_xapikey_variant == CONSUMER_API_TOKEN:
+        # print(f"[{log_timestamp}] [AUTH_SUCCESS] Token via XApiKey (variant) validado.")
         return True
 
+    # Tenta validar com Authorization Bearer
     if token_auth_header:
         scheme, _, token_value = token_auth_header.partition(' ')
         if scheme.lower() == "bearer" and token_value == CONSUMER_API_TOKEN:
+            # print(f"[{log_timestamp}] [AUTH_SUCCESS] Token via Bearer validado.")
             return True
     
-    print(f"[{log_timestamp}] [AUTH_FAIL] Token inválido ou ausente. X-Api-Key: '{token_xapi}', Authorization: '{token_auth_header}'")
+    # Se nenhuma autenticação funcionou
+    print(f"[{log_timestamp}] [AUTH_FAIL] Token inválido ou ausente. X-Api-Key: '{token_x_api_key}', XApiKey: '{token_xapikey_variant}', Authorization: '{token_auth_header}'")
     return False
 
 def transform_order_data(order_payload):
-    # Esta função transforma o pedido COMPLETO do CardapioWeb para o formato que guardamos internamente
-    # e que será usado para o endpoint de DETALHES do pedido.
     customer_data = order_payload.get("customer", {})
     phone_info = customer_data.get("phone", "")
 
@@ -135,8 +145,8 @@ def transform_order_data(order_payload):
     cardapio_web_order_id = str(order_payload.get("id"))
 
     transformed_base = {
-        "id": cardapio_web_order_id, # ID principal do pedido
-        "orderId": cardapio_web_order_id, # ID do pedido original (CardapioWeb)
+        "id": cardapio_web_order_id,
+        "orderId": cardapio_web_order_id,
         "displayId": str(order_payload.get("display_id", cardapio_web_order_id)),
         "orderType": order_payload.get("order_type", "DELIVERY").upper(),
         "salesChannel": order_payload.get("sales_channel", "CARDAPIOWEB").upper(),
@@ -164,7 +174,7 @@ def health_check():
         "status": "OK",
         "service": "Consumer-CardapioWeb API Bridge",
         "timestamp": agora_iso(),
-        "version": "2.5.0", # Versão para refletir token e clareza no polling
+        "version": "2.5.1", # verify_token flexível
         "pedidos_pendentes_count": len(PEDIDOS_PENDENTES),
         "pedidos_processados_count": len(PEDIDOS_PROCESSADOS)
     })
@@ -219,6 +229,7 @@ def webhook_orders():
 def polling_orders():
     log_timestamp = agora_iso()
     if not verify_token(request):
+        # O log de falha já é feito dentro de verify_token, e o errorhandler(401) formata a resposta
         return jsonify({"error": "Token de autenticação inválido ou ausente."}), 401
     
     try:
@@ -226,10 +237,9 @@ def polling_orders():
         for order_key in list(PEDIDOS_PENDENTES.keys()): 
             pedido_completo = PEDIDOS_PENDENTES.get(order_key)
             if pedido_completo:
-                # Monta o item para o polling com os campos resumidos especificados
                 items_para_polling.append({
-                    "id":       pedido_completo.get("id"), # Este é o ID da venda que o Consumer usará
-                    "orderId":  pedido_completo.get("orderId"), # Pode ser o mesmo que 'id' ou um ID de referência
+                    "id":       pedido_completo.get("id"),
+                    "orderId":  pedido_completo.get("orderId"),
                     "createdAt":pedido_completo.get("createdAt", log_timestamp), 
                     "fullCode": pedido_completo.get("fullCode", "PLACED"),
                     "code":     pedido_completo.get("code", "PLC")
@@ -237,7 +247,7 @@ def polling_orders():
         
         print(f"[{log_timestamp}] [POLLING_SUCCESS] Retornando {len(items_para_polling)} pedidos no formato resumido.")
         return jsonify({
-            "items": items_para_polling, # Lista de itens resumidos
+            "items": items_para_polling,
             "statusCode": 0,
             "reasonPhrase": None
         }), 200
@@ -245,7 +255,6 @@ def polling_orders():
         print(f"[{log_timestamp}] [POLLING_ERROR] Erro: {e}\n{traceback.format_exc()}")
         return jsonify({"error": "Erro interno ao processar polling.", "details": str(e)}), 500
 
-# ROTA CORRETA PARA DETALHES DO PEDIDO (Consumer deve usar esta estrutura de URL)
 @app.route('/api/parceiro/orders/<string:order_id>', methods=['GET'])
 def get_order_details(order_id):
     log_timestamp = agora_iso()
@@ -254,7 +263,6 @@ def get_order_details(order_id):
     
     try:
         order_id_str = str(order_id)
-        # O pedido completo já está transformado em PEDIDOS_PENDENTES ou PEDIDOS_PROCESSADOS
         pedido = PEDIDOS_PENDENTES.get(order_id_str)
         
         if not pedido:
@@ -270,12 +278,11 @@ def get_order_details(order_id):
             PEDIDOS_PROCESSADOS[order_id_str] = PEDIDOS_PENDENTES.pop(order_id_str)
             print(f"[{log_timestamp}] [GET_ORDER_MOVE] Pedido {order_id_str} movido para processados.")
 
-        return jsonify(pedido), 200 # Retorna o objeto de pedido completo
+        return jsonify(pedido), 200
     except Exception as e:
         print(f"[{log_timestamp}] [GET_ORDER_ERROR] Erro ao buscar {order_id}: {e}\n{traceback.format_exc()}")
         return jsonify({"error": "Erro interno ao buscar pedido.", "details": str(e)}), 500
 
-# ROTA CORRETA PARA ATUALIZAR STATUS (Consumer deve usar esta estrutura de URL)
 @app.route('/api/parceiro/orders/<string:order_id>/status', methods=['POST'])
 def update_order_status(order_id):
     log_timestamp = agora_iso()
@@ -329,7 +336,6 @@ def update_order_status(order_id):
         return jsonify({"error": "Erro interno ao atualizar status.", "details": str(e)}), 500
 
 # ----------- ENDPOINTS DE DEBUG (Opcional) -----------
-# ... (mantidos como na versão anterior) ...
 @app.route('/api/debug/orders', methods=['GET'])
 def debug_list_orders():
     return jsonify({
@@ -356,7 +362,6 @@ def handle_options_requests(order_id=None):
     return '', 204
 
 # ----------- ERROR HANDLERS GLOBAIS -----------
-# ... (mantidos como na versão anterior, garantindo respostas JSON) ...
 @app.errorhandler(400)
 def handle_bad_request(e):
     log_timestamp = agora_iso()
@@ -368,8 +373,6 @@ def handle_bad_request(e):
 def handle_unauthorized(e): 
     log_timestamp = agora_iso()
     desc = e.description if hasattr(e, 'description') else "Token de autenticação inválido ou ausente."
-    # O log de falha de autenticação específico já ocorre em verify_token se o token não for None
-    # Se o Flask gera o 401 por outros motivos (ex: @login_required sem login), este handler pega.
     print(f"[{log_timestamp}] [ERROR_HANDLER_401] Unauthorized access attempt. Description: {desc}")
     return jsonify(error="Não autorizado.", details=desc), 401
 
@@ -397,5 +400,5 @@ def handle_generic_exception(e):
 # ----------- EXECUÇÃO -----------
 if __name__ == '__main__':
     log_timestamp = agora_iso()
-    print(f"[{log_timestamp}] [STARTUP] Iniciando Consumer-CardapioWeb API Bridge v2.5.0 (Dev Mode)")
+    print(f"[{log_timestamp}] [STARTUP] Iniciando Consumer-CardapioWeb API Bridge v2.5.1 (Dev Mode)")
     app.run(debug=False, host='0.0.0.0', port=8080)
