@@ -1,28 +1,89 @@
-from flask import Flask, request, jsonify, abort, redirect
-from datetime import datetime
 import requests
+import re
+import json
+import traceback # Para logging detalhado de exceções
+from datetime import datetime, timezone
+from urllib.parse import urlunparse, urlparse
+from flask import Flask, request, jsonify, abort, redirect
 
+# Inicialização da aplicação Flask
 app = Flask(__name__)
 
-CARDAPIOWEB_BASE = 'https://integracao.cardapioweb.com/api/partner/v1'
-CARDAPIOWEB_TOKEN = 'avsj9dEaxd5YdYBW1bYjEycETsp87owQYu6Eh2J5'
-CARDAPIOWEB_MERCHANT = '14104'
+# ----------- CONFIGURAÇÃO ANTI-GZIP (SOMENTE PARA RESPOSTAS DA API) -----------
+@app.after_request
+def after_request_handler(response):
+    response.headers.pop('Content-Encoding', None)
+    response.headers.pop('Vary', None) 
+
+    if response.content_type and response.content_type.startswith('application/json'):
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Api-Key')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
+    return response
+
+@app.before_request
+def canonicalize_url_redirect():
+    path = request.path
+    if '//' in path:
+        canonical_path = re.sub(r'/+', '/', path)
+        parsed_url = urlparse(request.url)
+        canonical_url = urlunparse(parsed_url._replace(path=canonical_path))
+        return redirect(canonical_url, code=308)
+
+# ----------- CONFIGURAÇÕES GLOBAIS -----------
+CARDAPIOWEB_BASE_URL = 'https://integracao.cardapioweb.com/api/partner/v1'
+CARDAPIOWEB_API_KEY = 'avsj9dEaxd5YdYBW1bYjEycETsp87owQYu6Eh2J5'
+CARDAPIOWEB_MERCHANT_ID = '14104'
+# CORRIGIDO para pk_live_ conforme print da configuração do Consumer
 CONSUMER_API_TOKEN = 'pk_live_zT3r7Y!a9b#2DfLkW8QzM0XeP4nGpVt-7uC@HjLsEw9Rx1YvKmZBdNcTfUqAy'
 
 PEDIDOS_PENDENTES = {}
+PEDIDOS_PROCESSADOS = {}
 
-def agora():
-    return datetime.utcnow().isoformat()
+# ----------- FUNÇÕES AUXILIARES -----------
+def agora_iso():
+    return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
-def transform_order_data(order):
-    customer = order.get("customer") or {}
-    phone = customer.get("phone", "")
-    if isinstance(phone, str):
-        customer["phone"] = {"number": phone}
-    elif isinstance(phone, dict):
-        customer["phone"] = phone
+def _remove_null_values_recursive(obj_data):
+    if isinstance(obj_data, dict):
+        return {k: _remove_null_values_recursive(v) for k, v in obj_data.items() if v is not None}
+    elif isinstance(obj_data, list):
+        return [_remove_null_values_recursive(i) for i in obj_data if i is not None]
+    return obj_data
+
+def remove_null_values(obj_data):
+    return _remove_null_values_recursive(obj_data)
+
+def verify_token(current_request):
+    token_xapi = current_request.headers.get("X-Api-Key") 
+    token_auth_header = current_request.headers.get("Authorization")
+    log_timestamp = agora_iso()
+
+    if token_xapi and token_xapi == CONSUMER_API_TOKEN:
+        return True
+
+    if token_auth_header:
+        scheme, _, token_value = token_auth_header.partition(' ')
+        if scheme.lower() == "bearer" and token_value == CONSUMER_API_TOKEN:
+            return True
+    
+    print(f"[{log_timestamp}] [AUTH_FAIL] Token inválido ou ausente. X-Api-Key: '{token_xapi}', Authorization: '{token_auth_header}'")
+    return False
+
+def transform_order_data(order_payload):
+    # Esta função transforma o pedido COMPLETO do CardapioWeb para o formato que guardamos internamente
+    # e que será usado para o endpoint de DETALHES do pedido.
+    customer_data = order_payload.get("customer", {})
+    phone_info = customer_data.get("phone", "")
+
+    if isinstance(phone_info, str):
+        customer_data["phone"] = {"number": phone_info}
+    elif isinstance(phone_info, dict):
+        customer_data["phone"] = phone_info
     else:
-        customer["phone"] = {"number": str(phone)}
+        customer_data["phone"] = {"number": str(phone_info) if phone_info is not None else ""}
 
     def fix_option(opt):
         return {
@@ -36,135 +97,305 @@ def transform_order_data(order):
             "optionGroupTotalSelectedOptions": opt.get("option_group_total_selected_options", opt.get("optionGroupTotalSelectedOptions")),
         }
 
-    def fix_item(item):
+    def fix_item(item_data):
         return {
-            "id": str(item.get("item_id", item.get("id", ""))),
-            "externalCode": item.get("external_code", item.get("externalCode")),
-            "name": item.get("name", ""),
-            "quantity": int(item.get("quantity", 1)),
-            "unitPrice": float(item.get("unit_price", item.get("unitPrice", 0))),
-            "totalPrice": float(item.get("total_price", item.get("totalPrice", 0))),
-            "observations": item.get("observation", item.get("observations", "")),
-            "options": [fix_option(opt) for opt in item.get("options", [])]
+            "id": str(item_data.get("item_id", item_data.get("id", ""))),
+            "externalCode": item_data.get("external_code", item_data.get("externalCode")),
+            "name": item_data.get("name", ""),
+            "quantity": int(item_data.get("quantity", 1)),
+            "unitPrice": float(item_data.get("unit_price", item_data.get("unitPrice", 0))),
+            "totalPrice": float(item_data.get("total_price", item_data.get("totalPrice", 0))),
+            "observations": item_data.get("observation", item_data.get("observations", "")),
+            "options": [fix_option(opt) for opt in item_data.get("options", [])],
         }
 
-    items = [fix_item(i) for i in order.get("items", [])]
-    delivery = order.get("delivery", {})
-    address = delivery.get("deliveryAddress") or order.get("delivery_address") or {}
+    items_list = [fix_item(i) for i in order_payload.get("items", [])]
+    delivery_data = order_payload.get("delivery", {})
+    address_data = delivery_data.get("deliveryAddress", order_payload.get("delivery_address", {}))
+    current_time_iso = agora_iso()
+
     delivery_fixed = {
-        "deliveredBy": delivery.get("deliveredBy", order.get("delivered_by", "")),
-        "deliveryDateTime": delivery.get("deliveryDateTime", order.get("created_at", agora())),
-        "mode": delivery.get("mode", order.get("delivered_by", "")),
-        "pickupCode": delivery.get("pickupCode", None),
+        "deliveredBy": delivery_data.get("deliveredBy", order_payload.get("delivered_by", "")),
+        "deliveryDateTime": delivery_data.get("deliveryDateTime", order_payload.get("created_at", current_time_iso)),
+        "mode": delivery_data.get("mode", order_payload.get("delivery_mode", "")),
+        "pickupCode": delivery_data.get("pickupCode"),
         "deliveryAddress": {
-            "country": address.get("country", "Brasil"),
-            "state": address.get("state", ""),
-            "city": address.get("city", ""),
-            "postalCode": address.get("postalCode", address.get("postal_code", "")),
-            "streetName": address.get("streetName", address.get("street", "")),
-            "streetNumber": address.get("streetNumber", address.get("number", "")),
-            "neighborhood": address.get("neighborhood", ""),
-            "complement": address.get("complement", ""),
-            "reference": address.get("reference", "")
+            "country": address_data.get("country", "Brasil"),
+            "state": address_data.get("state", ""),
+            "city": address_data.get("city", ""),
+            "postalCode": address_data.get("postalCode", address_data.get("postal_code", "")),
+            "streetName": address_data.get("streetName", address_data.get("street", "")),
+            "streetNumber": address_data.get("streetNumber", address_data.get("number", "")),
+            "neighborhood": address_data.get("neighborhood", ""),
+            "complement": address_data.get("complement", ""),
+            "reference": address_data.get("reference", "")
         }
     }
-    order_id = str(order.get("id"))
-    base = {
-        "orderId": order_id,              # campo essencial para o Consumer!
-        "id": order_id,                   # opcional, para compatibilidade
-        "displayId": str(order.get("display_id", "")),
-        "orderType": order.get("order_type", "").upper(),
-        "salesChannel": order.get("sales_channel", "").upper(),
-        "orderTiming": order.get("order_timing", "").upper(),
-        "createdAt": order.get("created_at", agora()),
-        "customer": customer,
-        "delivery": delivery_fixed,
-        "items": items,
-        "merchant": {
-            "id": str(order.get("merchant_id", "")),
-            "name": "Seu Restaurante"
-        },
-        "total": order.get("total", {}),
-        "payments": order.get("payments", {}),
-        "status": "NEW",
-        "fullCode": "PLACED",
-        "code": "PLC"
-    }
-    return base
 
-def verify_token(request):
-    token1 = request.headers.get("Xapikey")
-    token2 = request.headers.get("Authorization")
-    if token1 == CONSUMER_API_TOKEN or (token2 and token2.split()[-1] == CONSUMER_API_TOKEN):
-        return True
-    return False
+    cardapio_web_order_id = str(order_payload.get("id"))
+
+    transformed_base = {
+        "id": cardapio_web_order_id, # ID principal do pedido
+        "orderId": cardapio_web_order_id, # ID do pedido original (CardapioWeb)
+        "displayId": str(order_payload.get("display_id", cardapio_web_order_id)),
+        "orderType": order_payload.get("order_type", "DELIVERY").upper(),
+        "salesChannel": order_payload.get("sales_channel", "CARDAPIOWEB").upper(),
+        "orderTiming": order_payload.get("order_timing", "IMMEDIATE").upper(),
+        "createdAt": order_payload.get("created_at", current_time_iso),
+        "customer": customer_data,
+        "delivery": delivery_fixed,
+        "items": items_list,
+        "merchant": {
+            "id": str(order_payload.get("merchant_id", CARDAPIOWEB_MERCHANT_ID)),
+            "name": order_payload.get("merchant_name", "Restaurante Padrão")
+        },
+        "total": float(order_payload.get("total", 0.0)),
+        "payments": order_payload.get("payments", []),
+        "status": "NEW", 
+        "fullCode": "PLACED", 
+        "code": "PLC" 
+    }
+    return remove_null_values(transformed_base)
+
+# ----------- ROTAS DA API -----------
+@app.route('/', methods=['GET'])
+def health_check():
+    return jsonify({
+        "status": "OK",
+        "service": "Consumer-CardapioWeb API Bridge",
+        "timestamp": agora_iso(),
+        "version": "2.5.0", # Versão para refletir token e clareza no polling
+        "pedidos_pendentes_count": len(PEDIDOS_PENDENTES),
+        "pedidos_processados_count": len(PEDIDOS_PROCESSADOS)
+    })
 
 @app.route('/webhook/orders', methods=['POST'])
 @app.route('/webhook/cardapioweb', methods=['POST'])
 def webhook_orders():
-    event = request.get_json()
-    print("DEBUG: Recebido no webhook:", event)
-    order_id = event.get("id") or event.get("order_id")
-    if not order_id:
-        return jsonify({"error": "Payload inesperado, sem id/order_id", "raw": event}), 400
-    if "order_id" in event and len(event.keys()) <= 6:
-        url = f"{CARDAPIOWEB_BASE}/orders/{order_id}"
-        headers = {"X-API-KEY": CARDAPIOWEB_TOKEN, "Content-Type": "application/json"}
-        params = {"merchant_id": CARDAPIOWEB_MERCHANT}
-        resp = requests.get(url, headers=headers, params=params)
-        if resp.status_code != 200:
-            print("Erro ao buscar detalhes para o pedido:", order_id, "Status:", resp.status_code)
-            return jsonify({"error": "Falha ao obter detalhes"}), 500
-        order = resp.json()
-    else:
-        order = event
-    pedido_transformado = transform_order_data(order)
-    PEDIDOS_PENDENTES[str(order_id)] = pedido_transformado
-    print(f"Pedido {order_id} capturado via webhook e armazenado.")
-    return jsonify({"success": True})
+    log_timestamp = agora_iso()
+    event_data = request.get_json(silent=True)
+    if not event_data:
+        print(f"[{log_timestamp}] [WEBHOOK_ERROR] Payload JSON vazio ou malformado.")
+        return jsonify({"error": "Payload JSON inválido ou ausente."}), 400
+    
+    order_id_from_event = str(event_data.get("id") or event_data.get("order_id"))
+    if not order_id_from_event or order_id_from_event == "None":
+        print(f"[{log_timestamp}] [WEBHOOK_ERROR] 'id' ou 'order_id' ausente. Payload: {event_data}")
+        return jsonify({"error": "'id' ou 'order_id' do pedido é obrigatório."}), 400
+
+    print(f"[{log_timestamp}] [WEBHOOK_RECEIVED] Evento para order_id: {order_id_from_event}")
+    order_details_payload = event_data
+    is_simple_notification = "order_id" in event_data and len(event_data.keys()) <= 6 
+
+    if is_simple_notification:
+        url = f"{CARDAPIOWEB_BASE_URL}/orders/{order_id_from_event}"
+        headers = {"X-API-KEY": CARDAPIOWEB_API_KEY, "Content-Type": "application/json"}
+        params = {"merchant_id": CARDAPIOWEB_MERCHANT_ID}
+        print(f"[{log_timestamp}] [WEBHOOK_FETCH] Buscando detalhes pedido {order_id_from_event}")
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            response.raise_for_status()
+            order_details_payload = response.json()
+            print(f"[{log_timestamp}] [WEBHOOK_FETCH_SUCCESS] Detalhes obtidos para {order_id_from_event}")
+        except requests.exceptions.RequestException as e:
+            print(f"[{log_timestamp}] [WEBHOOK_FETCH_ERROR] Falha ao buscar {order_id_from_event}: {e}\n{traceback.format_exc()}")
+            return jsonify({"error": f"Erro ao buscar detalhes no CardapioWeb: {str(e)}"}), 502
+
+    try:
+        pedido_transformado = transform_order_data(order_details_payload)
+        internal_order_id = pedido_transformado["id"] 
+        PEDIDOS_PENDENTES[internal_order_id] = pedido_transformado
+        print(f"[{log_timestamp}] [WEBHOOK_SUCCESS] Pedido {internal_order_id} armazenado. Pendentes: {len(PEDIDOS_PENDENTES)}")
+        return jsonify({
+            "success": True,
+            "orderId": internal_order_id,
+            "message": "Pedido recebido e agendado para processamento."
+        }), 200
+    except Exception as e:
+        print(f"[{log_timestamp}] [WEBHOOK_TRANSFORM_ERROR] Pedido {order_id_from_event}: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": f"Erro interno ao processar pedido: {str(e)}"}), 500
 
 @app.route('/api/parceiro/polling', methods=['GET'])
-def polling():
+def polling_orders():
+    log_timestamp = agora_iso()
     if not verify_token(request):
-        return abort(401)
-    pedidos = list(PEDIDOS_PENDENTES.values())
-    for pedido in pedidos:
-        pedido["status"] = "NEW"
-        pedido["fullCode"] = "PLACED"
-        pedido["code"] = "PLC"
-    print(f"Polling: {len(pedidos)} pedidos pendentes")
+        return jsonify({"error": "Token de autenticação inválido ou ausente."}), 401
+    
+    try:
+        items_para_polling = []
+        for order_key in list(PEDIDOS_PENDENTES.keys()): 
+            pedido_completo = PEDIDOS_PENDENTES.get(order_key)
+            if pedido_completo:
+                # Monta o item para o polling com os campos resumidos especificados
+                items_para_polling.append({
+                    "id":       pedido_completo.get("id"), # Este é o ID da venda que o Consumer usará
+                    "orderId":  pedido_completo.get("orderId"), # Pode ser o mesmo que 'id' ou um ID de referência
+                    "createdAt":pedido_completo.get("createdAt", log_timestamp), 
+                    "fullCode": pedido_completo.get("fullCode", "PLACED"),
+                    "code":     pedido_completo.get("code", "PLC")
+                })
+        
+        print(f"[{log_timestamp}] [POLLING_SUCCESS] Retornando {len(items_para_polling)} pedidos no formato resumido.")
+        return jsonify({
+            "items": items_para_polling, # Lista de itens resumidos
+            "statusCode": 0,
+            "reasonPhrase": None
+        }), 200
+    except Exception as e:
+        print(f"[{log_timestamp}] [POLLING_ERROR] Erro: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": "Erro interno ao processar polling.", "details": str(e)}), 500
+
+# ROTA CORRETA PARA DETALHES DO PEDIDO (Consumer deve usar esta estrutura de URL)
+@app.route('/api/parceiro/orders/<string:order_id>', methods=['GET'])
+def get_order_details(order_id):
+    log_timestamp = agora_iso()
+    if not verify_token(request):
+        return jsonify({"error": "Token de autenticação inválido ou ausente."}), 401
+    
+    try:
+        order_id_str = str(order_id)
+        # O pedido completo já está transformado em PEDIDOS_PENDENTES ou PEDIDOS_PROCESSADOS
+        pedido = PEDIDOS_PENDENTES.get(order_id_str)
+        
+        if not pedido:
+            pedido = PEDIDOS_PROCESSADOS.get(order_id_str)
+
+        if not pedido:
+            print(f"[{log_timestamp}] [GET_ORDER_NOT_FOUND] Pedido {order_id_str} não encontrado.")
+            return jsonify({"error": "Pedido não encontrado."}), 404
+
+        print(f"[{log_timestamp}] [GET_ORDER_SUCCESS] Retornando detalhes do pedido {order_id_str}.")
+        
+        if order_id_str in PEDIDOS_PENDENTES:
+            PEDIDOS_PROCESSADOS[order_id_str] = PEDIDOS_PENDENTES.pop(order_id_str)
+            print(f"[{log_timestamp}] [GET_ORDER_MOVE] Pedido {order_id_str} movido para processados.")
+
+        return jsonify(pedido), 200 # Retorna o objeto de pedido completo
+    except Exception as e:
+        print(f"[{log_timestamp}] [GET_ORDER_ERROR] Erro ao buscar {order_id}: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": "Erro interno ao buscar pedido.", "details": str(e)}), 500
+
+# ROTA CORRETA PARA ATUALIZAR STATUS (Consumer deve usar esta estrutura de URL)
+@app.route('/api/parceiro/orders/<string:order_id>/status', methods=['POST'])
+def update_order_status(order_id):
+    log_timestamp = agora_iso()
+    if not verify_token(request):
+        return jsonify({"error": "Token de autenticação inválido ou ausente."}), 401
+    
+    data = request.get_json(silent=True)
+    if not data:
+        print(f"[{log_timestamp}] [UPDATE_STATUS_ERROR] Payload JSON inválido para {order_id}.")
+        return jsonify({"error": "Payload JSON obrigatório."}), 400
+
+    new_status = data.get("status")
+    if not new_status:
+        print(f"[{log_timestamp}] [UPDATE_STATUS_ERROR] Campo 'status' ausente para {order_id}.")
+        return jsonify({"error": "Campo 'status' é obrigatório."}), 400
+
+    try:
+        order_id_str = str(order_id)
+        pedido_ref = None
+        origin_dict_name = ""
+
+        if order_id_str in PEDIDOS_PENDENTES:
+            pedido_ref = PEDIDOS_PENDENTES[order_id_str]
+            origin_dict_name = "PENDENTES"
+        elif order_id_str in PEDIDOS_PROCESSADOS:
+            pedido_ref = PEDIDOS_PROCESSADOS[order_id_str]
+            origin_dict_name = "PROCESSADOS"
+
+        if not pedido_ref:
+            print(f"[{log_timestamp}] [UPDATE_STATUS_NOT_FOUND] Pedido {order_id_str} não encontrado.")
+            return jsonify({"error": "Pedido não encontrado para atualização."}), 404
+
+        pedido_ref["status"] = new_status
+        pedido_ref["fullCode"] = data.get("fullCode", new_status.upper())
+        pedido_ref["code"] = data.get("code", new_status[:3].upper())
+        pedido_ref["updatedAt"] = log_timestamp
+
+        if origin_dict_name == "PENDENTES" and new_status.upper() in ["CONFIRMED", "DISPATCHED", "DELIVERED", "CONCLUDED", "CANCELLED", "CANCELED"]:
+             PEDIDOS_PROCESSADOS[order_id_str] = PEDIDOS_PENDENTES.pop(order_id_str)
+             print(f"[{log_timestamp}] [UPDATE_STATUS_MOVE] Pedido {order_id_str} movido para processados após status: {new_status}.")
+        
+        print(f"[{log_timestamp}] [UPDATE_STATUS_SUCCESS] Status do pedido {order_id_str} ({origin_dict_name}) atualizado para: {new_status}.")
+        return jsonify({
+            "success": True,
+            "orderId": order_id_str,
+            "status": pedido_ref["status"],
+            "updatedAt": pedido_ref["updatedAt"]
+        }), 200
+    except Exception as e:
+        print(f"[{log_timestamp}] [UPDATE_STATUS_ERROR] Erro ao atualizar {order_id}: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": "Erro interno ao atualizar status.", "details": str(e)}), 500
+
+# ----------- ENDPOINTS DE DEBUG (Opcional) -----------
+# ... (mantidos como na versão anterior) ...
+@app.route('/api/debug/orders', methods=['GET'])
+def debug_list_orders():
     return jsonify({
-        "items": pedidos
+        "pedidos_pendentes_count": len(PEDIDOS_PENDENTES),
+        "pedidos_processados_count": len(PEDIDOS_PROCESSADOS),
+        "ids_pedidos_pendentes": list(PEDIDOS_PENDENTES.keys()),
+        "ids_pedidos_processados": list(PEDIDOS_PROCESSADOS.keys()),
+        "timestamp": agora_iso()
     })
 
-# --------- DEBUG PRINTS ESPECIAL ---------
+@app.route('/api/debug/clear', methods=['POST'])
+def debug_clear_orders():
+    global PEDIDOS_PENDENTES, PEDIDOS_PROCESSADOS
+    PEDIDOS_PENDENTES.clear()
+    PEDIDOS_PROCESSADOS.clear()
+    print(f"[{agora_iso()}] [DEBUG_CLEAR] Todos os pedidos em memória foram limpos.")
+    return jsonify({"success": True, "message": "Todos os pedidos em memória foram limpos."})
 
-@app.route('/api/parceiro/order/<path:anyid>', methods=['GET', 'POST'], strict_slashes=False)
-def orderid_literal_fallback(anyid):
-    print(f"O Flask recebeu na barra simples (ou barra normalizada): '{anyid}'")
-    # Se houver barra dupla inicial, faz redirect para a rota canônica (1 barra)
-    if anyid.startswith('/'):
-        print("[DEBUG] Barra dupla no início 'anyid', tentando redirecionar para canonical")
-        return redirect(f"/api/parceiro/order/{anyid.lstrip('/')}", code=301)
-    anyid_norm = anyid.lstrip('/')
-    pedido = PEDIDOS_PENDENTES.get(anyid_norm)
-    if pedido:
-        if request.method == 'POST':
-            PEDIDOS_PENDENTES.pop(anyid_norm)
-            print(f"Pedido {anyid_norm} removido após POST (integrado)")
-        return jsonify(pedido)
-    print(f"Pedido {anyid_norm} não encontrado no dicionário PEDIDOS_PENDENTES.")
-    return jsonify({"error": "Pedido não encontrado."}), 404
+# ----------- TRATAMENTO DE OPTIONS (CORS Preflight) -----------
+@app.route('/api/parceiro/polling', methods=['OPTIONS'])
+@app.route('/api/parceiro/orders/<string:order_id>', methods=['OPTIONS'])
+@app.route('/api/parceiro/orders/<string:order_id>/status', methods=['OPTIONS'])
+def handle_options_requests(order_id=None):
+    return '', 204
 
-@app.route('/api/parceiro/order//<anyid>', methods=['GET', 'POST'], strict_slashes=False)
-def orderid_fallback_double_bar(anyid):
-    print(f"O Flask recebeu na rota ESPECIAL DE BARRA DUPLA: '{anyid}'")
-    anyid_norm = anyid.lstrip('/')
-    pedido = PEDIDOS_PENDENTES.get(anyid_norm)
-    if pedido:
-        if request.method == 'POST':
-            PEDIDOS_PENDENTES.pop(anyid_norm)
-            print(f"Pedido {anyid_norm} removido após POST (integrado)")
-        return jsonify(pedido)
-    print(f"Pedido {anyid_norm} não encontrado na barra dupla.")
-    return jsonify({"error": "Pedido não encontrado (barra dupla)."}), 404
+# ----------- ERROR HANDLERS GLOBAIS -----------
+# ... (mantidos como na versão anterior, garantindo respostas JSON) ...
+@app.errorhandler(400)
+def handle_bad_request(e):
+    log_timestamp = agora_iso()
+    desc = e.description if hasattr(e, 'description') else str(e)
+    print(f"[{log_timestamp}] [ERROR_400] Bad Request: {desc}")
+    return jsonify(error="Requisição inválida.", details=desc), 400
+
+@app.errorhandler(401)
+def handle_unauthorized(e): 
+    log_timestamp = agora_iso()
+    desc = e.description if hasattr(e, 'description') else "Token de autenticação inválido ou ausente."
+    # O log de falha de autenticação específico já ocorre em verify_token se o token não for None
+    # Se o Flask gera o 401 por outros motivos (ex: @login_required sem login), este handler pega.
+    print(f"[{log_timestamp}] [ERROR_HANDLER_401] Unauthorized access attempt. Description: {desc}")
+    return jsonify(error="Não autorizado.", details=desc), 401
+
+@app.errorhandler(404)
+def handle_not_found(e):
+    log_timestamp = agora_iso()
+    desc = e.description if hasattr(e, 'description') else str(e)
+    print(f"[{log_timestamp}] [ERROR_404] Not Found: {request.path}. Details: {desc}")
+    return jsonify(error="Recurso não encontrado.", endpoint=request.path), 404
+
+@app.errorhandler(500)
+def handle_internal_server_error(e): 
+    log_timestamp = agora_iso()
+    print(f"[{log_timestamp}] [ERROR_HANDLER_500] Internal Server Error: {e}\n{traceback.format_exc()}")
+    return jsonify(error="Erro interno do servidor.", details=str(e)), 500
+
+@app.errorhandler(Exception) 
+def handle_generic_exception(e):
+    log_timestamp = agora_iso()
+    print(f"[{log_timestamp}] [ERROR_HANDLER_GENERIC] Unhandled Exception: {e}\n{traceback.format_exc()}")
+    if hasattr(e, 'code') and isinstance(e.code, int) and 400 <= e.code < 600: 
+        return jsonify(error=str(e.name if hasattr(e, 'name') else type(e).__name__), details=str(e.description if hasattr(e, 'description') else e)), e.code
+    return jsonify(error="Erro inesperado no servidor."), 500
+
+# ----------- EXECUÇÃO -----------
+if __name__ == '__main__':
+    log_timestamp = agora_iso()
+    print(f"[{log_timestamp}] [STARTUP] Iniciando Consumer-CardapioWeb API Bridge v2.5.0 (Dev Mode)")
+    app.run(debug=False, host='0.0.0.0', port=8080)
