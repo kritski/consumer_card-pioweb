@@ -5,7 +5,7 @@ import re
 import json
 from urllib.parse import urlunparse, urlparse
 app = Flask(name)
-# ----------- CONFIGURAÇÃO ANTI-GZIP -----------
+ # ----------- CONFIGURAÇÃO ANTI-GZIP -----------
 class NoGzipRequest(Request):
     @property
     def accept_encodings(self):
@@ -37,7 +37,7 @@ def canonicalizeurl():
         parsedurl = urlparse(request.url)
         canonicalurl = urlunparse(parsedurl.replace(path=canonicalpath))
         return redirect(canonical_url, code=308)
------------ CONFIGURAÇÕES -----------
+# ----------- CONFIGURAÇÕES -----------
 CARDAPIOWEBBASE = 'https://integracao.cardapioweb.com/api/partner/v1'
 CARDAPIOWEBTOKEN = 'avsj9dEaxd5YdYBW1bYjEycETsp87owQYu6Eh2J5'
 CARDAPIOWEBMERCHANT = '14104'
