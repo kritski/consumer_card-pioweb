@@ -4,41 +4,25 @@ import json
 import traceback # Para logging detalhado de exceções
 from datetime import datetime, timezone
 from urllib.parse import urlunparse, urlparse
-from flask import Flask, request, jsonify, abort, redirect, Request # Importar Request explicitamente
+# REMOVIDO: Request de flask (não vamos customizar app.request_class)
+from flask import Flask, request, jsonify, abort, redirect 
 
 # Inicialização da aplicação Flask
 app = Flask(__name__)
 
-# ----------- CONFIGURAÇÃO ANTI-GZIP -----------
-# Classe de Request customizada para tentar influenciar o 'Accept-Encoding'
-# Esta classe será usada pelo Flask para criar objetos 'request'.
-class NoGzipRequest(Request): # Herdar diretamente de flask.Request
-    @property
-    def accept_encodings(self):
-        # Sobrepõe a propriedade para indicar que não aceitamos encodings comprimidos.
-        # Retornar uma string vazia.
-        return ""
-
-app.request_class = NoGzipRequest
-
-# Este before_request tenta modificar o environ para remover o 'Accept-Encoding'.
-# Sua eficácia pode variar dependendo do servidor WSGI e proxies.
-@app.before_request
-def disable_gzip_in_request_environ():
-    # Acessar request.environ aqui é seguro.
-    if 'HTTP_ACCEPT_ENCODING' in request.environ:
-        # Para sinalizar que o cliente original (ou este proxy) não quer gzip na resposta a ele.
-        # No entanto, a manipulação da RESPOSTA no after_request é mais crucial.
-        # request.environ['HTTP_ACCEPT_ENCODING'] = '' # Pode ser redundante se NoGzipRequest funcionar como esperado
-        pass # Deixado como no original, sua principal função é no after_request
+# ----------- CONFIGURAÇÃO ANTI-GZIP (SIMPLIFICADA) -----------
+# REMOVIDA a classe NoGzipRequest
+# REMOVIDA a atribuição app.request_class
+# REMOVIDO o @app.before_request disable_gzip_in_request_environ
 
 # Este after_request é crucial para garantir que as RESPOSTAS da NOSSA API não sejam comprimidas
-# e para adicionar headers CORS.
+# pela APLICAÇÃO e para adicionar headers CORS.
 @app.after_request
 def after_request_handler(response):
-    # Remover headers de encoding da resposta para evitar compressão pela NOSSA aplicação
+    # Tenta remover headers de encoding da resposta para evitar compressão pela NOSSA aplicação.
+    # Se um proxy externo (como o do Fly.io) adicionar Gzip depois, esta função não pode impedir.
     response.headers.pop('Content-Encoding', None)
-    response.headers.pop('Vary', None) # Vary pode estar relacionado a Content-Encoding
+    response.headers.pop('Vary', None) 
 
     # Garantir charset UTF-8 para JSON
     if response.content_type and response.content_type.startswith('application/json'):
@@ -52,7 +36,7 @@ def after_request_handler(response):
     return response
 
 @app.before_request
-def canonicalize_url_redirect(): # Nomeado para evitar conflito se 'canonicalize_url' for uma variável global
+def canonicalize_url_redirect():
     path = request.path
     if '//' in path:
         canonical_path = re.sub(r'/+', '/', path)
@@ -62,23 +46,21 @@ def canonicalize_url_redirect(): # Nomeado para evitar conflito se 'canonicalize
 
 # ----------- CONFIGURAÇÕES GLOBAIS -----------
 CARDAPIOWEB_BASE_URL = 'https://integracao.cardapioweb.com/api/partner/v1'
-CARDAPIOWEB_API_KEY = 'avsj9dEaxd5YdYBW1bYjEycETsp87owQYu6Eh2J5' # Seu token do CardapioWeb
-CARDAPIOWEB_MERCHANT_ID = '14104' # Seu ID de lojista do CardapioWeb
-CONSUMER_API_TOKEN = 'pklive_zT3r7Y!a9b#2DfLkW8QzM0XeP4nGpVt-7uC@HjLsEw9Rx1YvKmZBdNcTfUqAy' # Seu token da API Consumer
+CARDAPIOWEB_API_KEY = 'avsj9dEaxd5YdYBW1bYjEycETsp87owQYu6Eh2J5'
+CARDAPIOWEB_MERCHANT_ID = '14104'
+CONSUMER_API_TOKEN = 'pklive_zT3r7Y!a9b#2DfLkW8QzM0XeP4nGpVt-7uC@HjLsEw9Rx1YvKmZBdNcTfUqAy'
 
-# Armazenamento em memória (Para produção, considere um banco de dados ou Redis)
-# A linha abaixo era a causa do SyntaxError. Deve ser um comentário.
+# Armazenamento em memória 
+# (A linha original com SyntaxError foi corrigida para ser um comentário Python válido)
 # Armazenamento em memória (Para produção, considere um banco de dados ou Redis)
 PEDIDOS_PENDENTES = {}
 PEDIDOS_PROCESSADOS = {}
 
 # ----------- FUNÇÕES AUXILIARES -----------
 def agora_iso():
-    """Retorna o timestamp atual em formato ISO UTC com 'Z'."""
     return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 def _remove_null_values_recursive(obj_data):
-    """Helper recursivo para remover chaves com valores None."""
     if isinstance(obj_data, dict):
         return {k: _remove_null_values_recursive(v) for k, v in obj_data.items() if v is not None}
     elif isinstance(obj_data, list):
@@ -86,28 +68,25 @@ def _remove_null_values_recursive(obj_data):
     return obj_data
 
 def remove_null_values(obj_data):
-    """Remove chaves com valores None de um objeto (dicionário ou lista)."""
     return _remove_null_values_recursive(obj_data)
 
 def verify_token(current_request):
-    """Verifica o token de autenticação na requisição."""
     token_xapi = current_request.headers.get("X-Api-Key")
-    token_auth = current_request.headers.get("Authorization")
+    token_auth_header = current_request.headers.get("Authorization")
 
     if token_xapi and token_xapi == CONSUMER_API_TOKEN:
         return True
 
-    if token_auth:
-        scheme, _, token_value = token_auth.partition(' ')
+    if token_auth_header:
+        scheme, _, token_value = token_auth_header.partition(' ')
         if scheme.lower() == "bearer" and token_value == CONSUMER_API_TOKEN:
             return True
 
     log_timestamp = agora_iso()
-    print(f"[{log_timestamp}] [AUTH_FAIL] Token inválido - X-Api-Key: {token_xapi}, Authorization: {token_auth}")
+    print(f"[{log_timestamp}] [AUTH_FAIL] Token inválido - X-Api-Key: {token_xapi}, Authorization: {token_auth_header}")
     return False
 
 def transform_order_data(order_payload):
-    """Transforma os dados do pedido do formato CardapioWeb para o formato Consumer."""
     customer_data = order_payload.get("customer", {})
     phone_info = customer_data.get("phone", "")
 
@@ -197,7 +176,7 @@ def health_check():
         "status": "OK",
         "service": "Consumer-CardapioWeb API Bridge",
         "timestamp": agora_iso(),
-        "version": "2.2.0", # Incremento de versão
+        "version": "2.3.0", # Incremento de versão
         "pedidos_pendentes_count": len(PEDIDOS_PENDENTES),
         "pedidos_processados_count": len(PEDIDOS_PROCESSADOS)
     })
@@ -211,11 +190,12 @@ def webhook_orders():
         print(f"[{log_timestamp}] [WEBHOOK_ERROR] Payload JSON vazio ou malformado.")
         return jsonify({"error": "Payload JSON inválido ou ausente."}), 400
     
-    print(f"[{log_timestamp}] [WEBHOOK_RECEIVED] Payload: {json.dumps(event_data, ensure_ascii=False)}")
+    # Removido o print do payload completo para não poluir logs, a menos que necessário para debug
+    # print(f"[{log_timestamp}] [WEBHOOK_RECEIVED] Payload: {json.dumps(event_data, ensure_ascii=False)}")
 
     order_id_from_event = str(event_data.get("id") or event_data.get("order_id"))
     if not order_id_from_event or order_id_from_event == "None":
-        print(f"[{log_timestamp}] [WEBHOOK_ERROR] 'id' ou 'order_id' ausente: {event_data}")
+        print(f"[{log_timestamp}] [WEBHOOK_ERROR] 'id' ou 'order_id' ausente no payload.")
         return jsonify({"error": "'id' ou 'order_id' do pedido é obrigatório."}), 400
 
     is_simple_notification = "order_id" in event_data and len(event_data.keys()) <= 6 
@@ -225,7 +205,7 @@ def webhook_orders():
         url = f"{CARDAPIOWEB_BASE_URL}/orders/{order_id_from_event}"
         headers = {"X-API-KEY": CARDAPIOWEB_API_KEY, "Content-Type": "application/json"}
         params = {"merchant_id": CARDAPIOWEB_MERCHANT_ID}
-        print(f"[{log_timestamp}] [WEBHOOK_FETCH] Buscando detalhes pedido {order_id_from_event}: {url}")
+        print(f"[{log_timestamp}] [WEBHOOK_FETCH] Buscando detalhes pedido {order_id_from_event} em: {url}")
         try:
             response = requests.get(url, headers=headers, params=params, timeout=30)
             response.raise_for_status()
@@ -252,7 +232,7 @@ def webhook_orders():
 @app.route('/api/parceiro/polling', methods=['GET'])
 def polling_orders():
     log_timestamp = agora_iso()
-    if not verify_token(request): # 'request' é o proxy global do Flask
+    if not verify_token(request):
         return jsonify({"error": "Token de autenticação inválido ou ausente."}), 401
     
     try:
@@ -263,7 +243,7 @@ def polling_orders():
                 pedidos_para_consumer.append({
                     "id": pedido.get("id"),
                     "orderId": pedido.get("orderId"),
-                    "createdAt": pedido.get("createdAt", log_timestamp), # fallback para agora_iso
+                    "createdAt": pedido.get("createdAt", log_timestamp), 
                     "fullCode": pedido.get("fullCode", "PLACED"),
                     "code": pedido.get("code", "PLC")
                 })
@@ -287,7 +267,7 @@ def get_order_details(order_id):
     try:
         order_id_str = str(order_id)
         pedido = PEDIDOS_PENDENTES.get(order_id_str)
-        moved = False
+        
         if not pedido:
             pedido = PEDIDOS_PROCESSADOS.get(order_id_str)
 
@@ -299,7 +279,6 @@ def get_order_details(order_id):
         
         if order_id_str in PEDIDOS_PENDENTES:
             PEDIDOS_PROCESSADOS[order_id_str] = PEDIDOS_PENDENTES.pop(order_id_str)
-            moved = True
             print(f"[{log_timestamp}] [GET_ORDER_MOVE] Pedido {order_id_str} movido para processados.")
 
         return jsonify(pedido), 200
@@ -342,10 +321,8 @@ def update_order_status(order_id):
         pedido_ref["status"] = new_status
         pedido_ref["fullCode"] = data.get("fullCode", new_status.upper())
         pedido_ref["code"] = data.get("code", new_status[:3].upper())
-        pedido_ref["updatedAt"] = log_timestamp # usa o timestamp do início da requisição
+        pedido_ref["updatedAt"] = log_timestamp
 
-        # Se o status for final (ex: CONCLUIDO, CANCELADO), pode mover para processados se ainda em pendentes.
-        # Isso depende da sua lógica de fluxo de pedidos.
         if origin_dict_name == "PENDENTES" and new_status.upper() in ["CONFIRMED", "DISPATCHED", "DELIVERED", "CONCLUDED", "CANCELLED"]:
              PEDIDOS_PROCESSADOS[order_id_str] = PEDIDOS_PENDENTES.pop(order_id_str)
              print(f"[{log_timestamp}] [UPDATE_STATUS_MOVE] Pedido {order_id_str} movido para processados após status: {new_status}.")
@@ -361,21 +338,9 @@ def update_order_status(order_id):
         print(f"[{log_timestamp}] [UPDATE_STATUS_ERROR] Erro ao atualizar {order_id}: {e}\n{traceback.format_exc()}")
         return jsonify({"error": "Erro interno ao atualizar status.", "details": str(e)}), 500
 
-# TODO: Implementar novo endpoint para receber alterações do PDV vindas do Consumer,
-#       conforme mencionado por Yuri. Exemplo:
-# @app.route('/api/parceiro/pdv/changes', methods=['POST'])
-# def pdv_changes_webhook():
-# if not verify_token(request):
-# return jsonify({"error": "Token inválido"}), 401
-# pdv_update_data = request.get_json(silent=True)
-# # Processar pdv_update_data (ex: encaminhar para CardapioWeb se necessário)
-# print(f"[{agora_iso()}] [PDV_CHANGES] Recebida alteração do PDV: {pdv_update_data}")
-# return jsonify({"success": True, "message": "Alteração do PDV recebida."}), 200
-
 # ----------- ENDPOINTS DE DEBUG (Opcional) -----------
 @app.route('/api/debug/orders', methods=['GET'])
 def debug_list_orders():
-    # TODO: Proteger este endpoint em produção (ex: token de admin, IP restrito)
     return jsonify({
         "pedidos_pendentes_count": len(PEDIDOS_PENDENTES),
         "pedidos_processados_count": len(PEDIDOS_PROCESSADOS),
@@ -386,7 +351,6 @@ def debug_list_orders():
 
 @app.route('/api/debug/clear', methods=['POST'])
 def debug_clear_orders():
-    # TODO: Proteger este endpoint em produção
     global PEDIDOS_PENDENTES, PEDIDOS_PROCESSADOS
     PEDIDOS_PENDENTES.clear()
     PEDIDOS_PROCESSADOS.clear()
@@ -394,13 +358,11 @@ def debug_clear_orders():
     return jsonify({"success": True, "message": "Todos os pedidos em memória foram limpos."})
 
 # ----------- TRATAMENTO DE OPTIONS (CORS Preflight) -----------
-# O @app.after_request já adiciona os headers globais.
-# Rotas explícitas para OPTIONS podem ser mantidas para garantir compatibilidade.
 @app.route('/api/parceiro/polling', methods=['OPTIONS'])
 @app.route('/api/parceiro/orders/<string:order_id>', methods=['OPTIONS'])
 @app.route('/api/parceiro/orders/<string:order_id>/status', methods=['OPTIONS'])
 def handle_options_requests(order_id=None):
-    return '', 204 # No Content, os headers são adicionados pelo after_request
+    return '', 204
 
 # ----------- ERROR HANDLERS GLOBAIS -----------
 @app.errorhandler(400)
@@ -409,10 +371,11 @@ def bad_request_error(error):
     print(f"[{log_timestamp}] [ERROR_400] Bad Request: {error}")
     return jsonify({"error": "Requisição inválida.", "details": str(error.description if hasattr(error, 'description') else error)}), 400
 
-@app.errorhandler(401)
+@app.errorhandler(401) # Este será chamado se verify_token retornar 401
 def unauthorized_error(error):
     log_timestamp = agora_iso()
-    print(f"[{log_timestamp}] [ERROR_401] Unauthorized: {error}")
+    # O erro 401 já pode ter sido logado em verify_token, aqui é o handler do Flask
+    print(f"[{log_timestamp}] [ERROR_HANDLER_401] Unauthorized: {error}")
     return jsonify({"error": "Não autorizado. Token inválido ou ausente.", "details": str(error.description if hasattr(error, 'description') else error)}), 401
 
 @app.errorhandler(404)
@@ -421,19 +384,15 @@ def not_found_error(error):
     print(f"[{log_timestamp}] [ERROR_404] Not Found: {request.path} - {error}")
     return jsonify({"error": "Recurso não encontrado.", "endpoint": request.path}), 404
 
-@app.errorhandler(500)
-def internal_server_error(error): # Este handler lida com exceções não capturadas nas rotas
+@app.errorhandler(500) # Handler para exceções não capturadas nas rotas
+def internal_server_error(original_exception): # Nome da variável mudado para clareza
     log_timestamp = agora_iso()
-    # O traceback já deve ter sido logado pela rota se a exceção ocorreu lá.
-    # Se a exceção ocorreu antes da rota (ex: erro no framework), logamos aqui.
-    print(f"[{log_timestamp}] [ERROR_500] Internal Server Error: {error}\n{traceback.format_exc()}")
-    return jsonify({"error": "Erro interno do servidor.", "details": str(error)}), 500
+    # O traceback da exceção original é crucial aqui
+    print(f"[{log_timestamp}] [ERROR_HANDLER_500] Internal Server Error: {original_exception}\n{traceback.format_exc()}")
+    return jsonify({"error": "Erro interno do servidor.", "details": str(original_exception)}), 500
 
 # ----------- EXECUÇÃO (Para desenvolvimento local) -----------
 if __name__ == '__main__':
     log_timestamp = agora_iso()
-    print(f"[{log_timestamp}] [STARTUP] Iniciando Consumer-CardapioWeb API Bridge v2.2.0 (Dev Mode)")
-    # Para deploy em produção (como no Fly.io), use um servidor WSGI como Gunicorn.
-    # Ex: gunicorn -w 4 -b 0.0.0.0:8080 app:app
-    # O debug=True do Flask não é recomendado para produção.
+    print(f"[{log_timestamp}] [STARTUP] Iniciando Consumer-CardapioWeb API Bridge v2.3.0 (Dev Mode)")
     app.run(debug=False, host='0.0.0.0', port=8080)
