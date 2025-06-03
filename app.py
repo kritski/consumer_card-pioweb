@@ -170,3 +170,5 @@ def orderid_fallback_double_bar(anyid):
         return jsonify(pedido_clean)
     print(f"Pedido {anyid_norm} não encontrado na barra dupla.")
     return jsonify({"error": "Pedido não encontrado (barra dupla)."}), 404
+
+#versão de 3 dias atras
