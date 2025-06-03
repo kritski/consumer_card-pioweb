@@ -107,6 +107,30 @@ def verify_token(request):
         return True
     return False
 
+# --- INÍCIO DO PATCH DE TOLERÂNCIA ÀS BARRAS DUPLAS ---
+
+@app.before_request
+def canonicalize_url_remove_double_slash():
+    """
+    Redireciona qualquer requisição com barras duplas (//) no path para
+    a versão canônica (com apenas barras simples), usando HTTP 308.
+    Isso evita conflitos causados por clientes que montam caminhos malformados,
+    garantindo compatibilidade universal.
+    """
+    path = request.path
+    # Ignora a barra dupla do protocolo (https://)
+    if '//' in path:
+        # Substitui TODAS as ocorrências de múltiplas barras por uma barra
+        import re
+        canonical_path = re.sub(r'/+', '/', path)
+        # Mantém query string, domínio etc.
+        from urllib.parse import urlunparse, urlparse
+        parsed_url = urlparse(request.url)
+        canonical_url = urlunparse(parsed_url._replace(path=canonical_path))
+        return redirect(canonical_url, code=308)
+
+# --- FIM DO PATCH ---
+
 @app.route('/webhook/orders', methods=['POST'])
 @app.route('/webhook/cardapioweb', methods=['POST'])
 def webhook_orders():
@@ -158,15 +182,4 @@ def orderid_literal_fallback(anyid):
     print(f"Pedido {anyid_norm} não encontrado no dicionário PEDIDOS_PENDENTES.")
     return jsonify({"error": "Pedido não encontrado."}), 404
 
-@app.route('/api/parceiro/order//<anyid>', methods=['GET', 'POST'], strict_slashes=False)
-def orderid_fallback_double_bar(anyid):
-    anyid_norm = anyid.lstrip('/')
-    pedido = PEDIDOS_PENDENTES.get(anyid_norm)
-    if pedido:
-        pedido_clean = remove_nulls(pedido)
-        if request.method == 'POST':
-            PEDIDOS_PENDENTES.pop(anyid_norm)
-            print(f"Pedido {anyid_norm} removido após POST (integrado)")
-        return jsonify(pedido_clean)
-    print(f"Pedido {anyid_norm} não encontrado na barra dupla.")
-    return jsonify({"error": "Pedido não encontrado (barra dupla)."}), 404
+# O endpoint abaixo pode ser removido,
