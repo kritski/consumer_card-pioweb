@@ -1,10 +1,28 @@
-from flask import Flask, request, jsonify, abort, redirect
+from flask import Flask, request, jsonify, abort, redirect, Request
 from datetime import datetime
 import requests
 import re
 from urllib.parse import urlunparse, urlparse
 
 app = Flask(__name__)
+
+# ----------- ESSENCIAL: Garante que toda resposta seja sem gzip -----------
+
+class NoGzipRequest(Request):
+    @property
+    def accept_encodings(self):
+        # Sempre retorna vazio, não aceitando gzip
+        return []
+
+app.request_class = NoGzipRequest
+
+@app.before_request
+def disable_gzip_proxy():
+    # Remove qualquer Accept-Encoding para proxies/balancer não devolverem gzip
+    if 'HTTP_ACCEPT_ENCODING' in request.environ:
+        request.environ['HTTP_ACCEPT_ENCODING'] = ''
+
+# -------------------------------------------------------------------------
 
 CARDAPIOWEB_BASE = 'https://integracao.cardapioweb.com/api/partner/v1'
 CARDAPIOWEB_TOKEN = 'avsj9dEaxd5YdYBW1bYjEycETsp87owQYu6Eh2J5'
@@ -169,23 +187,4 @@ def polling():
     resp = jsonify({
         "items": pedidos,
         "statusCode": 0,
-        "reasonPhrase": None
-    })
-    # FORÇA devolução sem gzip, para compatibilidade com o Consumer
-    resp.headers['Content-Encoding'] = 'identity'
-    resp.headers['Vary'] = ''
-    return resp
-
-@app.route('/api/parceiro/order/<path:anyid>', methods=['GET', 'POST'], strict_slashes=False)
-def orderid_literal_fallback(anyid):
-    anyid_norm = anyid.lstrip('/')
-    print(f"[PEDIDO] Procurando ID: {anyid_norm} em {list(PEDIDOS_PENDENTES.keys())}")
-    pedido = PEDIDOS_PENDENTES.get(anyid_norm)
-    if pedido:
-        pedido_clean = remove_nulls(pedido)
-        if request.method == 'POST':
-            PEDIDOS_PENDENTES.pop(anyid_norm)
-            print(f"[PEDIDO] Pedido {anyid_norm} removido após POST (integrado)")
-        return jsonify(pedido_clean)
-    print(f"[PEDIDO] Pedido {anyid_norm} não encontrado!")
-    return jsonify({"error": "Pedido não encontrado."}), 404  # <-- Retorno adicionado!
+        "
