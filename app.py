@@ -180,4 +180,6 @@ def polling():
         "reasonPhrase": None
     })
 
-@app.route('/
+@app.route('/meu-endpoint')
+def meu_endpoint():
+    return "ok"
