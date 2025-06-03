@@ -165,11 +165,16 @@ def polling():
             "code": p.get("code", "PLC"),
         })
     print(f"[POLLING] {len(pedidos)} pedidos - items: {pedidos}")
-    return jsonify({
+
+    resp = jsonify({
         "items": pedidos,
         "statusCode": 0,
         "reasonPhrase": None
     })
+    # FORÇA devolução sem gzip, para compatibilidade com o Consumer
+    resp.headers['Content-Encoding'] = 'identity'
+    resp.headers['Vary'] = ''
+    return resp
 
 @app.route('/api/parceiro/order/<path:anyid>', methods=['GET', 'POST'], strict_slashes=False)
 def orderid_literal_fallback(anyid):
